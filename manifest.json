@@ -1,0 +1,75 @@
+{
+  "schemaVersion": 1,
+  "id": "omakube",
+  "name": "OmaKube",
+  "version": "0.1.0",
+  "author": "OmaKube",
+  "license": "MIT",
+  "description": "Kubernetes contexts, namespaces, workloads, logs and quick actions — single anchored popup in the Omarchy bar.",
+  "kinds": [
+    "bar-widget"
+  ],
+  "entryPoints": {
+    "barWidget": "Panel.qml"
+  },
+  "barWidget": {
+    "displayName": "OmaKube",
+    "description": "Active k8s context pill with health dot; click for the full Kubernetes popup.",
+    "category": "System",
+    "allowMultiple": false,
+    "defaultSection": "right",
+    "defaults": {
+      "refreshIntervalSec": 30,
+      "defaultNamespace": "default",
+      "kubeconfigPath": "",
+      "logExportDir": "",
+      "readOnly": false,
+      "debugLogging": false
+    },
+    "schema": [
+      {
+        "key": "refreshIntervalSec",
+        "type": "integer",
+        "label": "Refresh interval (seconds)",
+        "min": 5,
+        "max": 3600,
+        "step": 5,
+        "defaultValue": 30
+      },
+      {
+        "key": "defaultNamespace",
+        "type": "string",
+        "label": "Default namespace",
+        "defaultValue": "default"
+      },
+      {
+        "key": "kubeconfigPath",
+        "type": "path",
+        "label": "Kubeconfig override",
+        "defaultValue": "",
+        "description": "Optional. Leave empty to use $KUBECONFIG or ~/.kube/config like kubectl."
+      },
+      {
+        "key": "logExportDir",
+        "type": "path",
+        "label": "Log export directory",
+        "defaultValue": "",
+        "description": "Where log-tail exports are saved. Defaults to ~/omakube-logs."
+      },
+      {
+        "key": "readOnly",
+        "type": "boolean",
+        "label": "Read-only mode",
+        "defaultValue": false,
+        "description": "Disables all mutating actions (restart, kill pod, port-forward)."
+      },
+      {
+        "key": "debugLogging",
+        "type": "boolean",
+        "label": "Debug logging",
+        "defaultValue": false,
+        "description": "Verbose backend logging for connection/auth troubleshooting."
+      }
+    ]
+  }
+}
