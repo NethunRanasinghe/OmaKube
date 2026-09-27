@@ -21,7 +21,7 @@ Panel {
   readonly property color urgent: bar ? bar.urgent : Color.urgent
   readonly property color dim: bar ? Qt.darker(bar.foreground, 1.55) : Qt.darker(Color.foreground, 1.55)
   readonly property string fontFamily: bar ? bar.fontFamily : Style.font.family
-  readonly property color accent: backend.contextAccent || Color.accent
+  readonly property color accent: Color.accent
   readonly property color healthDot: Model.healthColor(backend.healthStatus, foreground, urgent, accent)
   readonly property color barFg: bar ? bar.barForeground : Color.foreground
   readonly property string pillLabel: {
@@ -87,7 +87,7 @@ Panel {
 
   readonly property var logPalette: ({
     text: String(foreground), dim: String(dim), error: String(urgent),
-    warn: "#d9a13b", match: "rgba(217,161,59,0.45)", matchCurrent: "rgba(229,72,77,0.65)"
+    warn: String(Color.accent), match: String(Style.selectionFillFor(foreground, Color.accent)), matchCurrent: String(Color.accent)
   })
 
   function toggleFull() {
@@ -544,6 +544,10 @@ Panel {
     function setNs(ns: string): void { backend.setNamespace(ns) }
     function setKind(k: string): void { root.selectedResourceKind = k }
     function setCtx(c: string): void { backend.setContext(c) }
+    function exportLogs(): void { backend.exportLogs("") }
+    function startFw(targetKind: string, target: string, lp: string, rp: string): void { backend.startForward(targetKind, target, lp, rp) }
+    function stopFw(fid: int): void { backend.stopForward(fid) }
+    function runAction(op: string, kind: string, name: string): void { backend.runAction(op, kind, name) }
     function toggleNs(): void { root.nsPickerOpen = !root.nsPickerOpen }
     function toggleKind(): void { root.kindPickerOpen = !root.kindPickerOpen }
     function toggleCtx(): void { root.contextPickerOpen = !root.contextPickerOpen }
@@ -1041,13 +1045,15 @@ Panel {
         BorderSurface {
           visible: backend.actionStatus !== "" || backend.lastError !== ""
           Layout.fillWidth: true
-          implicitHeight: Style.space(24)
-          color: backend.lastError !== "" && backend.actionStatus === "" ? Qt.rgba(root.urgent.r, root.urgent.g, root.urgent.b, 0.12) : Qt.rgba(root.accent.r, root.accent.g, root.accent.b, 0.12)
-          borderSpec: Border.controlSpec("normal", backend.lastError !== "" ? root.urgent : root.accent, root.accent)
+          implicitHeight: Style.space(26)
+          color: backend.lastError !== "" && backend.actionStatus === "" ? Qt.rgba(root.urgent.r, root.urgent.g, root.urgent.b, 0.12) : Qt.rgba(Color.accent.r, Color.accent.g, Color.accent.b, 0.12)
+          borderSpec: Border.controlSpec("normal", backend.lastError !== "" ? root.urgent : Color.accent, Color.accent)
 
           RowLayout {
             anchors.fill: parent
             anchors.leftMargin: Style.space(8); anchors.rightMargin: Style.space(8)
+            spacing: Style.space(6)
+
             Text {
               Layout.fillWidth: true
               textFormat: Text.PlainText
@@ -1057,6 +1063,28 @@ Panel {
               font.pixelSize: Style.font.caption
               font.bold: true
               elide: Text.ElideRight
+            }
+
+            Button {
+              visible: backend.actionStatus.indexOf("Saved ") === 0
+              text: "Open Folder"
+              fontSize: Style.font.caption - 1
+              horizontalPadding: Style.space(6); verticalPadding: 1
+              bordered: true
+              onClicked: backend.openExportDir(String(backend.setting("logExportDir", "") || ""))
+            }
+
+            Text {
+              text: "✕"
+              color: root.dim
+              font.pixelSize: Style.font.caption
+              Layout.alignment: Qt.AlignVCenter
+              MouseArea {
+                anchors.fill: parent
+                hoverEnabled: true
+                cursorShape: Qt.PointingHandCursor
+                onClicked: { backend.actionStatus = ""; backend.lastError = "" }
+              }
             }
           }
         }
@@ -1408,6 +1436,13 @@ Panel {
                   bordered: true
                   onClicked: backend.exportLogs(String(backend.setting("logExportDir", "") || ""))
                 }
+
+                Button {
+                  text: "Folder"
+                  fontSize: Style.font.caption
+                  bordered: true
+                  onClicked: backend.openExportDir(String(backend.setting("logExportDir", "") || ""))
+                }
               }
 
               // Terminal Container (Fills 100% of remaining space)
@@ -1468,7 +1503,7 @@ Panel {
                     OmakubeIcon {
                       anchors.fill: parent
                       iconSize: Style.space(24)
-                      color: root.accent
+                      color: Color.accent
                       opacityLevel: 0.95
                     }
                   }
@@ -1568,126 +1603,191 @@ Panel {
                 width: parent.width
                 spacing: Style.space(10)
 
-                Text {
-                  text: "CONFIGURATION"
-                  color: root.dim
-                  font.bold: true
-                  font.pixelSize: Style.font.caption
-                }
-
-                // Kubeconfig
-                Column {
-                  width: parent.width; spacing: Style.space(2)
-                  Text { text: "Kubeconfig path override"; color: root.dim; font.pixelSize: Style.font.caption }
-                  TextField {
-                    width: parent.width; foreground: root.foreground; placeholderText: "Empty = $KUBECONFIG / ~/.kube/config"
-                    text: String(backend.setting("kubeconfigPath", "") || "")
-                    onAccepted: { backend.persist({ kubeconfigPath: text.trim() }); backend.refresh(true) }
-                  }
-                }
-
-                // Default Namespace
-                Column {
-                  width: parent.width; spacing: Style.space(2)
-                  Text { text: "Default namespace"; color: root.dim; font.pixelSize: Style.font.caption }
-                  TextField {
-                    width: parent.width; foreground: root.foreground; placeholderText: "default"
-                    text: String(backend.setting("defaultNamespace", "") || "")
-                    onAccepted: { backend.persist({ defaultNamespace: text.trim() }) }
-                  }
-                }
-
-                // Log Export Directory
-                Column {
-                  width: parent.width; spacing: Style.space(2)
-                  Text { text: "Log export directory"; color: root.dim; font.pixelSize: Style.font.caption }
-                  TextField {
-                    width: parent.width; foreground: root.foreground; placeholderText: "~/omakube-logs"
-                    text: String(backend.setting("logExportDir", "") || "")
-                    onAccepted: { backend.persist({ logExportDir: text.trim() }) }
-                  }
-                }
-
-                // Refresh interval
-                RowLayout {
+                // Group 1: Cluster & Navigation Defaults
+                BorderSurface {
                   width: parent.width
-                  Text { Layout.fillWidth: true; text: "Refresh interval (seconds)"; color: root.foreground; font.pixelSize: Style.font.bodySmall }
-                  NumberField {
-                    value: backend.refreshIntervalSec; from: 5; to: 3600; stepSize: 5
-                    foreground: root.foreground
-                    onModified: function(v) { backend.persist({ refreshIntervalSec: v }) }
-                  }
-                }
+                  implicitHeight: clusterCol.implicitHeight + Style.space(16)
+                  radius: Style.cornerRadius
+                  color: Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, 0.03)
+                  borderSpec: Border.controlSpec("normal", root.dim, Color.accent)
 
-                // Read-only mode
-                RowLayout {
-                  width: parent.width
-                  ColumnLayout {
-                    Layout.fillWidth: true; spacing: 0
-                    Text { text: "Read-only mode"; color: root.foreground; font.pixelSize: Style.font.bodySmall }
-                    Text { text: "Disables restart, kill pod and port-forward"; color: root.dim; font.pixelSize: Style.font.caption }
-                  }
-                  ToggleSwitch {
-                    checked: backend.readOnly; foreground: root.foreground
-                    onToggled: backend.persist({ readOnly: !backend.readOnly })
-                  }
-                }
-
-                // Debug logging
-                RowLayout {
-                  width: parent.width
-                  ColumnLayout {
-                    Layout.fillWidth: true; spacing: 0
-                    Text { text: "Debug logging"; color: root.foreground; font.pixelSize: Style.font.bodySmall }
-                    Text { text: "Verbose backend logging for auth issues"; color: root.dim; font.pixelSize: Style.font.caption }
-                  }
-                  ToggleSwitch {
-                    checked: backend.debugLogging; foreground: root.foreground
-                    onToggled: backend.persist({ debugLogging: !backend.debugLogging })
-                  }
-                }
-
-                PanelSeparator { foreground: root.foreground }
-
-                // Context Accents
-                Text {
-                  text: "CONTEXT ACCENT COLORS"
-                  color: root.dim
-                  font.bold: true
-                  font.pixelSize: Style.font.caption
-                }
-
-                Repeater {
-                  model: backend.contexts
-                  RowLayout {
-                    required property var modelData
-                    width: parent.width
+                  Column {
+                    id: clusterCol
+                    anchors.left: parent.left; anchors.right: parent.right; anchors.top: parent.top
+                    anchors.margins: Style.space(8)
                     spacing: Style.space(8)
 
-                    Rectangle {
-                      width: Style.space(14); height: Style.space(14); radius: width / 2
-                      color: modelData.accent || root.accent
-                      MouseArea {
-                        anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor
-                        onClicked: backend.cycleAccent(String(modelData.name))
+                    Text {
+                      text: "CLUSTER & NAVIGATION"
+                      color: root.dim; font.bold: true; font.pixelSize: Style.font.caption
+                    }
+
+                    // Default Namespace
+                    Column {
+                      width: parent.width; spacing: Style.space(3)
+                      RowLayout {
+                        width: parent.width
+                        Text { text: "Default namespace"; color: root.foreground; font.pixelSize: Style.font.bodySmall; font.bold: true }
+                        Item { Layout.fillWidth: true }
+                        Chip {
+                          label: "default"
+                          active: String(backend.setting("defaultNamespace", "") || "") === "default"
+                          onClicked: {
+                            backend.persist({ defaultNamespace: "default" })
+                            nsField.text = "default"
+                          }
+                        }
+                        Chip {
+                          label: "* (all)"
+                          active: String(backend.setting("defaultNamespace", "") || "") === "*"
+                          onClicked: {
+                            backend.persist({ defaultNamespace: "*" })
+                            nsField.text = "*"
+                          }
+                        }
+                      }
+                      TextField {
+                        id: nsField
+                        width: parent.width; foreground: root.foreground; placeholderText: "default"
+                        text: String(backend.setting("defaultNamespace", "") || "")
+                        onAccepted: backend.persist({ defaultNamespace: text.trim() })
                       }
                     }
 
-                    Text {
-                      Layout.fillWidth: true
-                      text: String(modelData.name)
-                      color: root.foreground
-                      font.family: root.fontFamily
-                      font.pixelSize: Style.font.bodySmall
-                      font.bold: String(modelData.name) === backend.activeContextName
-                      elide: Text.ElideRight
+                    // Kubeconfig Override
+                    Column {
+                      width: parent.width; spacing: Style.space(3)
+                      RowLayout {
+                        width: parent.width
+                        Text { text: "Kubeconfig override"; color: root.foreground; font.pixelSize: Style.font.bodySmall; font.bold: true }
+                        Item { Layout.fillWidth: true }
+                        Button {
+                          visible: String(backend.setting("kubeconfigPath", "") || "").trim() !== ""
+                          text: "Reset"
+                          fontSize: Style.font.caption - 1
+                          horizontalPadding: Style.space(6); verticalPadding: 1
+                          bordered: true
+                          onClicked: {
+                            backend.persist({ kubeconfigPath: "" })
+                            kcfgField.text = ""
+                            backend.refresh(true)
+                          }
+                        }
+                      }
+                      TextField {
+                        id: kcfgField
+                        width: parent.width; foreground: root.foreground; placeholderText: "Empty = $KUBECONFIG / ~/.kube/config"
+                        text: String(backend.setting("kubeconfigPath", "") || "")
+                        onAccepted: { backend.persist({ kubeconfigPath: text.trim() }); backend.refresh(true) }
+                      }
                     }
+                  }
+                }
+
+                // Group 2: Telemetry & Logs
+                BorderSurface {
+                  width: parent.width
+                  implicitHeight: telemetryCol.implicitHeight + Style.space(16)
+                  radius: Style.cornerRadius
+                  color: Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, 0.03)
+                  borderSpec: Border.controlSpec("normal", root.dim, Color.accent)
+
+                  Column {
+                    id: telemetryCol
+                    anchors.left: parent.left; anchors.right: parent.right; anchors.top: parent.top
+                    anchors.margins: Style.space(8)
+                    spacing: Style.space(8)
 
                     Text {
-                      text: String(modelData.accent || "")
-                      color: root.dim
-                      font.family: "monospace"
-                      font.pixelSize: Style.font.caption
+                      text: "LOGS & REFRESH"
+                      color: root.dim; font.bold: true; font.pixelSize: Style.font.caption
+                    }
+
+                    // Log Export Directory + Open Folder button
+                    Column {
+                      width: parent.width; spacing: Style.space(3)
+                      RowLayout {
+                        width: parent.width
+                        Text { text: "Log export directory"; color: root.foreground; font.pixelSize: Style.font.bodySmall; font.bold: true }
+                        Item { Layout.fillWidth: true }
+                        Button {
+                          text: "Open Folder"
+                          fontSize: Style.font.caption - 1
+                          horizontalPadding: Style.space(6); verticalPadding: 1
+                          bordered: true
+                          onClicked: backend.openExportDir(logDirField.text.trim())
+                        }
+                      }
+                      TextField {
+                        id: logDirField
+                        width: parent.width; foreground: root.foreground; placeholderText: "~/omakube-logs"
+                        text: String(backend.setting("logExportDir", "") || "")
+                        onAccepted: backend.persist({ logExportDir: text.trim() })
+                      }
+                    }
+
+                    // Refresh interval
+                    RowLayout {
+                      width: parent.width
+                      ColumnLayout {
+                        Layout.fillWidth: true; spacing: 0
+                        Text { text: "Background refresh interval"; color: root.foreground; font.pixelSize: Style.font.bodySmall; font.bold: true }
+                        Text { text: "Frequency of background cluster status polling"; color: root.dim; font.pixelSize: Style.font.caption }
+                      }
+                      NumberField {
+                        value: backend.refreshIntervalSec; from: 5; to: 3600; stepSize: 5
+                        foreground: root.foreground
+                        onModified: function(v) { backend.persist({ refreshIntervalSec: v }) }
+                      }
+                    }
+                  }
+                }
+
+                // Group 3: Safety & Governance
+                BorderSurface {
+                  width: parent.width
+                  implicitHeight: safetyCol.implicitHeight + Style.space(16)
+                  radius: Style.cornerRadius
+                  color: Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, 0.03)
+                  borderSpec: Border.controlSpec("normal", root.dim, Color.accent)
+
+                  Column {
+                    id: safetyCol
+                    anchors.left: parent.left; anchors.right: parent.right; anchors.top: parent.top
+                    anchors.margins: Style.space(8)
+                    spacing: Style.space(8)
+
+                    Text {
+                      text: "SAFETY & DIAGNOSTICS"
+                      color: root.dim; font.bold: true; font.pixelSize: Style.font.caption
+                    }
+
+                    // Read-only mode
+                    RowLayout {
+                      width: parent.width
+                      ColumnLayout {
+                        Layout.fillWidth: true; spacing: 0
+                        Text { text: "Read-only mode"; color: root.foreground; font.pixelSize: Style.font.bodySmall; font.bold: true }
+                        Text { text: "Disables restart, kill pod and port-forward mutations"; color: root.dim; font.pixelSize: Style.font.caption }
+                      }
+                      ToggleSwitch {
+                        checked: backend.readOnly; foreground: root.foreground
+                        onToggled: backend.persist({ readOnly: !backend.readOnly })
+                      }
+                    }
+
+                    // Debug logging
+                    RowLayout {
+                      width: parent.width
+                      ColumnLayout {
+                        Layout.fillWidth: true; spacing: 0
+                        Text { text: "Debug logging"; color: root.foreground; font.pixelSize: Style.font.bodySmall; font.bold: true }
+                        Text { text: "Verbose CLI diagnostics for auth and networking issues"; color: root.dim; font.pixelSize: Style.font.caption }
+                      }
+                      ToggleSwitch {
+                        checked: backend.debugLogging; foreground: root.foreground
+                        onToggled: backend.persist({ debugLogging: !backend.debugLogging })
+                      }
                     }
                   }
                 }

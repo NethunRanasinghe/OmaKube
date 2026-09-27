@@ -842,13 +842,27 @@ Item {
     onExited: function(exitCode) {
       if (exitCode === 0) {
         root.actionStatus = "Saved " + root._exportTarget
+        statusTimer.restart()
       } else {
         root.lastError = Model.humanError(String(exStderr.text || "")) || "Export failed"
         root.lastErrorKind = "unknown"
         root.actionStatus = ""
+        statusTimer.restart()
       }
       root._exportTarget = ""
     }
+  }
+
+  Process {
+    id: openDirProcess
+    running: false
+    command: []
+  }
+
+  function openExportDir(dir) {
+    var d = String(dir || setting("logExportDir", "") || (Quickshell.env("HOME") + "/omakube-logs")).trim()
+    openDirProcess.command = ["sh", "-c", "mkdir -p \"" + d + "\" && (xdg-open \"" + d + "\" || nautilus \"" + d + "\" || dolphin \"" + d + "\" || thunar \"" + d + "\")"]
+    openDirProcess.running = true
   }
 
   Timer {
