@@ -1045,7 +1045,11 @@ Panel {
               boundsBehavior: Flickable.StopAtBounds
               model: root.filteredWorkloads()
               spacing: Style.space(4)
-              visible: backend.workloadsFresh
+              visible: opacity > 0.01
+              opacity: backend.workloadsFresh ? 1.0 : 0.0
+              Behavior on opacity {
+                NumberAnimation { duration: 120; easing.type: Easing.OutCubic }
+              }
               ScrollBar.vertical: ScrollBar { policy: ScrollBar.AsNeeded }
 
               delegate: WorkloadRow {
@@ -1062,7 +1066,11 @@ Panel {
             Column {
               anchors.centerIn: parent
               spacing: Style.space(8)
-              visible: !backend.workloadsFresh
+              visible: opacity > 0.01
+              opacity: !backend.workloadsFresh ? 1.0 : 0.0
+              Behavior on opacity {
+                NumberAnimation { duration: 120; easing.type: Easing.OutCubic }
+              }
 
               Item {
                 anchors.horizontalCenter: parent.horizontalCenter
@@ -1109,25 +1117,48 @@ Panel {
               }
             }
 
-            // Empty state
+            // Empty state with actionable shortcuts
             Column {
               anchors.centerIn: parent
-              spacing: Style.space(4)
+              spacing: Style.space(6)
               visible: backend.workloadsFresh && root.filteredWorkloads().length === 0
+
               Text {
                 anchors.horizontalCenter: parent.horizontalCenter
                 text: "○"
                 color: root.dim
                 font.pixelSize: Style.font.display
               }
+
               Text {
                 anchors.horizontalCenter: parent.horizontalCenter
                 textFormat: Text.PlainText
-                text: omniSearch.text.trim() !== "" ? ("No match for “" + omniSearch.text.trim() + "”") : "No workloads found"
+                text: omniSearch.text.trim() !== "" ? ("No match for “" + omniSearch.text.trim() + "”") : ("No " + (root.selectedResourceKind === "all" ? "workloads" : Model.formatKindLabel(root.selectedResourceKind).toLowerCase()) + " found in " + (backend.activeNamespace === "*" ? "all namespaces" : backend.activeNamespace))
                 color: root.foreground
                 font.family: root.fontFamily
                 font.pixelSize: Style.font.bodySmall
                 font.bold: true
+              }
+
+              RowLayout {
+                anchors.horizontalCenter: parent.horizontalCenter
+                spacing: Style.space(6)
+
+                Button {
+                  visible: root.selectedResourceKind !== "all" && root.totalWorkloadCount() > 0
+                  text: "View All (" + root.totalWorkloadCount() + ")"
+                  fontSize: Style.font.caption
+                  bordered: true
+                  onClicked: root.selectedResourceKind = "all"
+                }
+
+                Button {
+                  visible: backend.activeNamespace !== "*"
+                  text: "All Namespaces (*)"
+                  fontSize: Style.font.caption
+                  bordered: true
+                  onClicked: backend.setNamespace("*")
+                }
               }
             }
           }
