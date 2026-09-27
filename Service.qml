@@ -60,10 +60,11 @@ Item {
   function restoreNamespace(ctxName, fallbackNs) {
     var perCtx = setting("namespaces", null)
     if (perCtx && typeof perCtx === "object" && perCtx[String(ctxName)]) {
-      return String(perCtx[String(ctxName)])
+      var s = String(perCtx[String(ctxName)])
+      if (s !== "" && s !== "undefined") return s
     }
     if (defaultNamespace !== "") return defaultNamespace
-    return String(fallbackNs || "default")
+    return "default"
   }
 
   function accentFor(name) {
@@ -129,7 +130,9 @@ Item {
 
   function setPopupOpen(open) {
     _popupOpen = open === true
-    if (_popupOpen) fetchData()
+    if (_popupOpen && activeContextName !== "") {
+      if (!workloadsFresh || namespaces.length === 0) fetchData()
+    }
   }
 
   function refresh(force) {
@@ -210,9 +213,11 @@ Item {
         contextAccent = String(act.accent)
         activeNamespace = restoreNamespace(pick, act.ns)
       }
+      fetchData()
     } else if (pick !== "") {
       var act2 = activeContext()
       if (act2) contextAccent = String(act2.accent)
+      if (!workloadsFresh) fetchData()
     }
     if (contexts.length === 0) {
       lastError = "No contexts in kubeconfig — add one with kubectl first."
@@ -832,6 +837,7 @@ Item {
     if (remembered !== "") {
       activeContextName = remembered
       contextAccent = accentFor(remembered)
+      activeNamespace = restoreNamespace(remembered, "default")
     }
     // Reap orphaned forwards from a previous shell instance — no live
     // Service owns them (forwardModel starts empty), so by definition

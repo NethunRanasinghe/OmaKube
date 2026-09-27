@@ -51,7 +51,7 @@ Panel {
 
   // Navigation states
   property string topMode: "workloads" // "workloads" | "events" | "logs" | "forwards" | "settings"
-  property string selectedResourceKind: "all"
+  property string selectedResourceKind: "pods"
   property string sortMode: "Status" // Status | Name | Age
   property bool compactMode: true
   property bool eventsOnlyWarnings: false
@@ -168,6 +168,15 @@ Panel {
     var sum = 0
     for (var i = 0; i < kinds.length; i++) sum += kinds[i].count
     return sum
+  }
+
+  function currentResourceCount() {
+    if (selectedResourceKind === "all") return totalWorkloadCount()
+    var kinds = availableResourceKinds()
+    for (var i = 0; i < kinds.length; i++) {
+      if (kinds[i].id === selectedResourceKind) return kinds[i].count
+    }
+    return 0
   }
 
   function ensureLogPod() {
@@ -526,6 +535,9 @@ Panel {
     function expand(key: string): void { backend.expandedKey = key }
     function setMode(mode: string): void { root.switchTab(mode) }
     function setLogPod(pod: string): void { backend.setLogPod(pod); root.switchTab("logs") }
+    function toggleNs(): void { root.nsPickerOpen = !root.nsPickerOpen }
+    function toggleKind(): void { root.kindPickerOpen = !root.kindPickerOpen }
+    function toggleCtx(): void { root.contextPickerOpen = !root.contextPickerOpen }
   }
 
   // ---- Bar pill ----
@@ -741,7 +753,7 @@ Panel {
                 spacing: Style.space(4)
 
                 Text {
-                  text: (root.selectedResourceKind === "all" ? "All" : Model.formatKindLabel(root.selectedResourceKind)) + " (" + root.totalWorkloadCount() + ")"
+                  text: (root.selectedResourceKind === "all" ? "All" : Model.formatKindLabel(root.selectedResourceKind)) + " (" + root.currentResourceCount() + ")"
                   color: root.foreground
                   font.family: root.fontFamily
                   font.pixelSize: Style.font.bodySmall
@@ -822,24 +834,44 @@ Panel {
         }
 
         // =================================================================
-        // ZONE B: UNIFIED OMNIBAR & STATUS STRIP (32px)
-        // [ Filter ( / to focus, @ns, :kind ) ]  [Sort: Status ▾] [Density]
+        // ZONE B: UNIFIED OMNIBAR & STATUS STRIP (28px)
+        // [ ⌕ Filter pods… (/) ]  [Sort: Status ▾] [Compact]
         // =================================================================
-        Item {
+        BorderSurface {
           Layout.fillWidth: true
-          implicitHeight: Style.space(32)
+          Layout.leftMargin: Style.space(8)
+          Layout.rightMargin: Style.space(8)
+          Layout.topMargin: Style.space(3)
+          Layout.bottomMargin: Style.space(3)
+          implicitHeight: Style.space(28)
+          radius: Style.cornerRadius
+          color: Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, 0.04)
+          borderSpec: Border.controlSpec("normal", root.dim, root.accent)
 
           RowLayout {
             anchors.fill: parent
             anchors.leftMargin: Style.space(8)
-            anchors.rightMargin: Style.space(8)
+            anchors.rightMargin: Style.space(6)
             spacing: Style.space(6)
+
+            Text {
+              text: "⌕"
+              color: root.dim
+              font.pixelSize: Style.font.bodySmall
+              Layout.alignment: Qt.AlignVCenter
+            }
 
             TextField {
               id: omniSearch
               Layout.fillWidth: true
+              Layout.alignment: Qt.AlignVCenter
               foreground: root.foreground
-              placeholderText: root.topMode === "logs" ? "Search log stream… (/)" : "Filter ( / to focus, @ns, :kind )"
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.caption
+              horizontalPadding: 0
+              verticalPadding: 0
+              background: null
+              placeholderText: root.topMode === "logs" ? "Search log stream… (/)" : ("Filter " + (root.selectedResourceKind === "all" ? "all workloads" : Model.formatKindLabel(root.selectedResourceKind).toLowerCase()) + "… (/)")
               text: root.topMode === "logs" ? root.logSearch : ""
               onTextChanged: {
                 if (root.topMode === "logs") {
@@ -864,6 +896,24 @@ Panel {
               }
             }
 
+            // Clear button
+            Text {
+              visible: omniSearch.text.trim() !== ""
+              text: "✕"
+              color: root.dim
+              font.pixelSize: Style.font.caption - 1
+              Layout.alignment: Qt.AlignVCenter
+              MouseArea {
+                anchors.fill: parent
+                hoverEnabled: true
+                cursorShape: Qt.PointingHandCursor
+                onClicked: {
+                  omniSearch.clear()
+                  if (root.topMode === "logs") root.logSearch = ""
+                }
+              }
+            }
+
             // Match count indicator for logs
             Text {
               visible: root.topMode === "logs" && root.logSearch.trim() !== ""
@@ -883,38 +933,68 @@ Panel {
             Button {
               visible: root.topMode === "logs" && root.logSearch.trim() !== ""
               text: "‹"
-              fontSize: Style.font.caption
-              horizontalPadding: Style.space(6); verticalPadding: Style.space(2)
+              fontSize: Style.font.caption - 1
+              horizontalPadding: Style.space(6); verticalPadding: 1
               bordered: true
               onClicked: root.stepMatch(-1)
             }
             Button {
               visible: root.topMode === "logs" && root.logSearch.trim() !== ""
               text: "›"
-              fontSize: Style.font.caption
-              horizontalPadding: Style.space(6); verticalPadding: Style.space(2)
+              fontSize: Style.font.caption - 1
+              horizontalPadding: Style.space(6); verticalPadding: 1
               bordered: true
               onClicked: root.stepMatch(1)
             }
 
-            // Sort Cycler button
-            Button {
+            // Sort button
+            CursorSurface {
               visible: root.topMode === "workloads"
-              text: root.sortMode
-              fontSize: Style.font.caption
-              horizontalPadding: Style.space(8); verticalPadding: Style.space(2)
-              bordered: true
-              onClicked: root.cycleSort()
+              implicitHeight: Style.space(20)
+              implicitWidth: sortText.implicitWidth + Style.space(10)
+              foreground: root.foreground
+
+              Text {
+                id: sortText
+                anchors.centerIn: parent
+                text: "Sort: " + root.sortMode
+                color: root.dim
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.caption - 1
+                font.bold: true
+              }
+
+              MouseArea {
+                anchors.fill: parent
+                hoverEnabled: true
+                cursorShape: Qt.PointingHandCursor
+                onClicked: root.cycleSort()
+              }
             }
 
             // Density Mode Toggle Button
-            Button {
+            CursorSurface {
               visible: root.topMode === "workloads"
-              text: root.compactMode ? "Compact" : "Comfort"
-              fontSize: Style.font.caption
-              horizontalPadding: Style.space(8); verticalPadding: Style.space(2)
-              bordered: true
-              onClicked: root.compactMode = !root.compactMode
+              implicitHeight: Style.space(20)
+              implicitWidth: denseText.implicitWidth + Style.space(10)
+              foreground: root.foreground
+
+              Text {
+                id: denseText
+                anchors.centerIn: parent
+                text: root.compactMode ? "Compact" : "Comfort"
+                color: root.dim
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.caption - 1
+                font.bold: true
+              }
+
+              MouseArea {
+                anchors.fill: parent
+                hoverEnabled: true
+                cursorShape: Qt.PointingHandCursor
+                onClicked: root.compactMode = !root.compactMode
+              }
             }
           }
         }
@@ -969,7 +1049,7 @@ Panel {
               delegate: WorkloadRow {
                 required property var modelData
                 required property int index
-                width: wlList.width - (wlList.ScrollBar.vertical && wlList.ScrollBar.vertical.visible ? Style.space(8) : 0)
+                width: wlList.width - (wlList.ScrollBar.vertical.visible ? Style.space(8) : 0)
                 row: modelData
                 rowIndex: index
                 isCompact: root.compactMode
@@ -1060,7 +1140,7 @@ Panel {
                 delegate: EventRow {
                   required property var modelData
                   required property int index
-                  width: evList.width - (evList.ScrollBar.vertical && evList.ScrollBar.vertical.visible ? Style.space(8) : 0)
+                  width: evList.width - (evList.ScrollBar.vertical.visible ? Style.space(8) : 0)
                   ev: modelData
                   rowIndex: index
                 }
@@ -1519,7 +1599,7 @@ Panel {
         anchors.left: parent.left
         anchors.leftMargin: Style.space(8)
         width: Style.space(300)
-        height: Math.min(Style.space(320), ctxPickerCol.implicitHeight + Style.space(16))
+        height: Style.space(260)
         radius: Style.cornerRadius
         color: Color.background || "#181a1f"
         borderSpec: Border.controlSpec("normal", root.dim, root.accent)
@@ -1602,7 +1682,7 @@ Panel {
         anchors.left: parent.left
         anchors.leftMargin: Style.space(40)
         width: Style.space(320)
-        height: Math.min(Style.space(360), nsPickerCol.implicitHeight + Style.space(16))
+        height: Style.space(280)
         radius: Style.cornerRadius
         color: Color.background || "#181a1f"
         borderSpec: Border.controlSpec("normal", root.dim, root.accent)
@@ -1640,7 +1720,7 @@ Panel {
 
             delegate: CursorSurface {
               required property var modelData
-              width: nsListPop.width - (nsListPop.ScrollBar.vertical && nsListPop.ScrollBar.vertical.visible ? Style.space(8) : 0)
+              width: nsListPop.width - (nsListPop.ScrollBar.vertical.visible ? Style.space(8) : 0)
               implicitHeight: Style.space(32)
               current: String(modelData.name) === backend.activeNamespace
               foreground: root.foreground
@@ -1700,7 +1780,7 @@ Panel {
         anchors.left: parent.left
         anchors.leftMargin: Style.space(120)
         width: Style.space(260)
-        height: Math.min(Style.space(360), kindPickerCol.implicitHeight + Style.space(16))
+        height: Style.space(280)
         radius: Style.cornerRadius
         color: Color.background || "#181a1f"
         borderSpec: Border.controlSpec("normal", root.dim, root.accent)
@@ -1761,7 +1841,7 @@ Panel {
 
             delegate: CursorSurface {
               required property var modelData
-              width: kindListPop.width - (kindListPop.ScrollBar.vertical && kindListPop.ScrollBar.vertical.visible ? Style.space(8) : 0)
+              width: kindListPop.width - (kindListPop.ScrollBar.vertical.visible ? Style.space(8) : 0)
               implicitHeight: Style.space(28)
               current: root.selectedResourceKind === modelData.id
               foreground: root.foreground
@@ -1804,7 +1884,7 @@ Panel {
         anchors.left: parent.left
         anchors.leftMargin: Style.space(8)
         width: Style.space(320)
-        height: Math.min(Style.space(360), logPodCol.implicitHeight + Style.space(16))
+        height: Style.space(280)
         radius: Style.cornerRadius
         color: Color.background || "#181a1f"
         borderSpec: Border.controlSpec("normal", root.dim, root.accent)
@@ -1842,7 +1922,7 @@ Panel {
 
             delegate: CursorSurface {
               required property var modelData
-              width: logPodListPop.width - (logPodListPop.ScrollBar.vertical && logPodListPop.ScrollBar.vertical.visible ? Style.space(8) : 0)
+              width: logPodListPop.width - (logPodListPop.ScrollBar.vertical.visible ? Style.space(8) : 0)
               implicitHeight: Style.space(30)
               current: backend.logPod === String(modelData.name)
               foreground: root.foreground
