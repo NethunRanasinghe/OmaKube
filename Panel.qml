@@ -44,6 +44,8 @@ Panel {
   property string fwLocal: ""
   property string fwRemote: ""
   property bool settingsOpen: false
+  property bool contextsOpen: false
+  property bool namespacesOpen: true
   // Pending destructive confirmation: {op, kind, name, label}
   property var confirmState: null
   readonly property var logPalette: ({
@@ -449,8 +451,8 @@ Panel {
     bar: root.bar
     open: root.opened
     focusTarget: keyCatcher
-    contentWidth: Math.min(Style.space(472), panel.fittedContentWidth(Style.space(472)))
-    contentHeight: panel.fittedContentHeight(column.implicitHeight, Style.space(560))
+    contentWidth: Math.min(Style.space(490), panel.fittedContentWidth(Style.space(490)))
+    contentHeight: panel.fittedContentHeight(column.implicitHeight + Style.space(16), Style.space(580))
 
     PanelKeyCatcher {
       id: keyCatcher
@@ -466,7 +468,7 @@ Panel {
       Flickable {
         anchors.fill: parent
         contentWidth: width
-        contentHeight: column.implicitHeight
+        contentHeight: column.implicitHeight + Style.space(16)
         clip: true
         boundsBehavior: Flickable.StopAtBounds
         flickableDirection: Flickable.VerticalFlick
@@ -584,8 +586,16 @@ Panel {
               visible: backend.namespaces.length > 0
               width: parent.width
               spacing: Style.space(6)
-              PanelSectionHeader { text: "NAMESPACE · " + backend.activeNamespace.toUpperCase(); foreground: root.foreground; fontFamily: root.fontFamily }
+
+              SectionToggle {
+                title: "NAMESPACES"
+                badge: backend.activeNamespace
+                open: root.namespacesOpen
+                onToggled: root.namespacesOpen = !root.namespacesOpen
+              }
+
               Flickable {
+                visible: root.namespacesOpen
                 width: parent.width
                 height: nsRow.height
                 contentWidth: nsRow.width
@@ -1025,14 +1035,10 @@ Panel {
               width: parent.width
               spacing: Style.space(8)
 
-              RowLayout {
-                width: parent.width
-                PanelSectionHeader { text: "SETTINGS"; foreground: root.foreground; fontFamily: root.fontFamily }
-                Item { Layout.fillWidth: true; height: 1 }
-                Chip {
-                  label: root.settingsOpen ? "Hide" : "Show"
-                  onClicked: root.settingsOpen = !root.settingsOpen
-                }
+              SectionToggle {
+                title: "SETTINGS"
+                open: root.settingsOpen
+                onToggled: root.settingsOpen = !root.settingsOpen
               }
 
               Column {
@@ -1237,10 +1243,17 @@ Panel {
             Column {
               width: parent.width
               spacing: Style.space(8)
-              PanelSectionHeader { text: "CONTEXTS"; foreground: root.foreground; fontFamily: root.fontFamily }
+
+              SectionToggle {
+                title: "CONTEXTS"
+                badge: backend.contexts.length > 0 ? (backend.contexts.length + " available") : ""
+                open: root.contextsOpen
+                onToggled: root.contextsOpen = !root.contextsOpen
+              }
 
               Column {
                 id: ctxColumn
+                visible: root.contextsOpen
                 width: parent.width
                 spacing: Style.space(6)
                 Repeater {
@@ -1256,16 +1269,9 @@ Panel {
               }
             }
 
-            Text {
+            Item {
               width: parent.width
-              horizontalAlignment: Text.AlignRight
-              textFormat: Text.PlainText
-              elide: Text.ElideRight
-              maximumLineCount: 1
-              text: backend.heroDetail() !== "" ? backend.heroDetail() : "kubernetes"
-              color: root.dim
-              font.family: root.fontFamily
-              font.pixelSize: Style.font.caption
+              height: Style.space(6)
             }
           }
         }
@@ -1699,6 +1705,56 @@ Panel {
           }
         }
       }
+    }
+  }
+
+  component SectionToggle: Item {
+    id: secToggle
+    property string title: ""
+    property string badge: ""
+    property bool open: false
+    signal toggled()
+
+    width: parent.width
+    height: Math.max(headerText.implicitHeight, Style.space(22))
+
+    RowLayout {
+      anchors.fill: parent
+      spacing: Style.space(6)
+
+      PanelSectionHeader {
+        id: headerText
+        text: secToggle.title
+        foreground: root.foreground
+        fontFamily: root.fontFamily
+      }
+
+      Text {
+        visible: secToggle.badge !== ""
+        textFormat: Text.PlainText
+        text: "· " + secToggle.badge
+        color: root.dim
+        font.family: root.fontFamily
+        font.pixelSize: Style.font.caption
+      }
+
+      Item { Layout.fillWidth: true; height: 1 }
+
+      Text {
+        textFormat: Text.PlainText
+        text: secToggle.open ? "▾" : "▸"
+        color: root.dim
+        font.family: root.fontFamily
+        font.pixelSize: Style.font.caption
+        font.bold: true
+      }
+    }
+
+    MouseArea {
+      anchors.fill: parent
+      hoverEnabled: true
+      cursorShape: Qt.PointingHandCursor
+      onClicked: secToggle.toggled()
     }
   }
 
