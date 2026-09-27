@@ -37,6 +37,12 @@ Panel {
   property string activeTab: "Pods"
   readonly property var wlTabs: ["Pods", "Deploy", "STS", "DS", "Svc", "Jobs", "Events", "Logs"]
   readonly property var resourceTabs: ["Pods", "Deploy", "STS", "DS", "Svc", "Jobs"]
+  property string topMode: "workloads" // "workloads" | "events" | "logs"
+  onTopModeChanged: {
+    if (topMode === "logs") ensureLogPod()
+    else if (topMode === "events") backend.fetchEvents()
+  }
+  property string selectedResourceKind: "all"
   property string sortMode: "Status" // Status | Name | Age
   property string logSearch: ""
   property int currentMatchLine: -1
@@ -45,7 +51,7 @@ Panel {
   property string fwRemote: ""
   property bool settingsOpen: false
   property bool contextsOpen: false
-  property bool namespacesOpen: true
+  property bool namespacesOpen: false
   // Pending destructive confirmation: {op, kind, name, label}
   property var confirmState: null
   readonly property var logPalette: ({
@@ -54,28 +60,61 @@ Panel {
   })
 
   function isResourceTab() {
-    return resourceTabs.indexOf(activeTab) >= 0
-  }
-
-  function scrollTabIntoView(tab) {
-    var idx = wlTabs.indexOf(tab)
-    if (idx < 0 || !wlTabRow || idx >= wlTabRow.children.length) return
-    var item = wlTabRow.children[idx]
-    if (!item || !wlTabFlick) return
-    if (item.x < wlTabFlick.contentX) {
-      wlTabFlick.contentX = item.x
-    } else if (item.x + item.width > wlTabFlick.contentX + wlTabFlick.width) {
-      wlTabFlick.contentX = item.x + item.width - wlTabFlick.width
-    }
+    return topMode === "workloads"
   }
 
   function switchTab(tab) {
-    activeTab = tab
+    if (tab === "Events") {
+      topMode = "events"
+      backend.fetchEvents()
+    } else if (tab === "Logs") {
+      topMode = "logs"
+      ensureLogPod()
+    } else {
+      topMode = "workloads"
+      selectedResourceKind = String(tab || "all").toLowerCase()
+    }
     backend.expandedKey = ""
     pulseWlList()
-    Qt.callLater(function() { root.scrollTabIntoView(tab) })
-    if (tab === "Events") backend.fetchEvents()
-    else if (tab === "Logs") ensureLogPod()
+  }
+
+  function availableResourceKinds() {
+    var w = backend.workloads
+    if (!w) return []
+    var standard = [
+      { key: "pods", label: "Pods" },
+      { key: "deployments", label: "Deployments" },
+      { key: "services", label: "Services" },
+      { key: "statefulsets", label: "StatefulSets" },
+      { key: "daemonsets", label: "DaemonSets" },
+      { key: "jobs", label: "Jobs" }
+    ]
+    var out = []
+    var seen = {}
+    for (var i = 0; i < standard.length; i++) {
+      var item = standard[i]
+      var list = w[item.key]
+      if (list instanceof Array && list.length > 0) {
+        out.push({ id: item.key, label: item.label, count: list.length })
+        seen[item.key] = true
+      }
+    }
+    for (var k in w) {
+      if (k === "namespace" || seen[k]) continue
+      var customList = w[k]
+      if (customList instanceof Array && customList.length > 0) {
+        var cap = k.charAt(0).toUpperCase() + k.slice(1)
+        out.push({ id: k, label: cap, count: customList.length })
+      }
+    }
+    return out
+  }
+
+  function totalWorkloadCount() {
+    var kinds = availableResourceKinds()
+    var sum = 0
+    for (var i = 0; i < kinds.length; i++) sum += kinds[i].count
+    return sum
   }
 
   // Gentle fade for user-initiated list changes only — background polls
@@ -150,7 +189,7 @@ Panel {
     if (!r) return
     if (a === "logs") {
       backend.setLogPod(String(r.target))
-      root.switchTab("Logs")
+      root.topMode = "logs"
       return
     }
     if (a === "forward") {
@@ -197,48 +236,91 @@ Panel {
     return 2
   }
 
-  function normRow(tab, it) {
-    if (tab === "Pods") {
+  function normRow(kind, it) {
+    var kLower = String(kind || "").toLowerCase()
+    if (kLower === "pods" || kLower === "pod") {
       return {
         key: "pod/" + it.name, kind: it.kind, title: it.name,
+        typeLabel: "Pod",
         badge: it.display, badgeKind: it.kind,
-        meta: it.ready + "/" + it.readyTotal + " · " + it.restarts + " restarts · " + it.age + " · " + (it.node || "?"),
+        meta: it.ready + "/" + it.readyTotal + " ready · " + it.restarts + " restarts · " + it.age + " · " + (it.node || "?"),
         ageSeconds: it.ageSeconds || 0, sev: sevOf(it.kind),
         targetKind: "pod", target: it.name, remoteHint: 80,
+        rawPod: it,
         lines: podLines(it)
       }
     }
-    if (tab === "Svc") {
+    if (kLower === "services" || kLower === "svc") {
       return {
         key: "svc/" + it.name, kind: "running", title: it.name,
+        typeLabel: "Service",
         badge: it.type, badgeKind: "running",
         meta: (it.clusterIP || "") + " · " + (it.ports || "") + " · " + it.age,
         ageSeconds: it.ageSeconds || 0, sev: 2,
         targetKind: "service", target: it.name, remoteHint: Model.firstPort(it.ports),
-        lines: ["Type " + it.type, "ClusterIP " + (it.clusterIP || "—"), "Ports " + (it.ports || "—")]
+        rawItem: it,
+        lines: ["Type: " + it.type, "ClusterIP: " + (it.clusterIP || "—"), "Ports: " + (it.ports || "—"), "Age: " + it.age]
       }
     }
-    if (tab === "Jobs") {
+    if (kLower === "jobs" || kLower === "job") {
       var jk = it.statusKind || "waiting"
       return {
         key: "job/" + it.name, kind: jk, title: it.name + (it.kind === "CronJob" ? "  ◷ " + (it.schedule || "") : ""),
+        typeLabel: it.kind || "Job",
         badge: it.display, badgeKind: jk,
         meta: it.kind + " · A" + it.active + "/S" + it.succeeded + "/F" + it.failed + " · " + it.age,
         ageSeconds: it.ageSeconds || 0, sev: sevOf(jk),
         targetKind: "", target: "", remoteHint: 0,
-        lines: [it.kind + (it.schedule ? " · " + it.schedule : ""), "active " + it.active + " · succeeded " + it.succeeded + " · failed " + it.failed]
+        rawItem: it,
+        lines: [(it.schedule ? ("Schedule: " + it.schedule) : ""), "Active: " + it.active + " · Succeeded: " + it.succeeded + " · Failed: " + it.failed, "Age: " + it.age].filter(function(s){return s !== ""})
       }
     }
     // Deploy / STS / DS scale rows
-    var tk = tab === "STS" ? "statefulset" : (tab === "DS" ? "daemonset" : "deployment")
-    return {
-      key: tab + "/" + it.name, kind: it.kind, title: it.name,
-      badge: it.display, badgeKind: it.kind,
-      meta: it.ready + "/" + it.desired + " · upd " + it.updated + " · avail " + it.available + " · " + it.age,
-      ageSeconds: it.ageSeconds || 0, sev: sevOf(it.kind),
-      targetKind: tk, target: it.name, remoteHint: 80,
-      lines: ["ready " + it.ready + "/" + it.desired, "updated " + it.updated + " · available " + it.available]
+    var tk = kLower.indexOf("sts") >= 0 || kLower.indexOf("stateful") >= 0 ? "statefulset"
+      : (kLower.indexOf("ds") >= 0 || kLower.indexOf("daemon") >= 0 ? "daemonset" : "deployment")
+    var typeLabel = tk === "statefulset" ? "StatefulSet" : (tk === "daemonset" ? "DaemonSet" : "Deployment")
+    if (kLower === "deployments" || kLower === "deploy" || kLower === "statefulsets" || kLower === "sts" || kLower === "daemonsets" || kLower === "ds") {
+      return {
+        key: tk + "/" + it.name, kind: it.kind, title: it.name,
+        typeLabel: typeLabel,
+        badge: it.display, badgeKind: it.kind,
+        meta: it.ready + "/" + it.desired + " ready · upd " + it.updated + " · avail " + it.available + " · " + it.age,
+        ageSeconds: it.ageSeconds || 0, sev: sevOf(it.kind),
+        targetKind: tk, target: it.name, remoteHint: 80,
+        rawItem: it,
+        lines: ["Ready: " + it.ready + "/" + it.desired, "Updated: " + it.updated + " · Available: " + it.available, "Age: " + it.age]
+      }
     }
+    // Generic / Custom Resource Definition (CRD) row!
+    return {
+      key: kind + "/" + (it.name || "item"),
+      kind: it.kind || "running",
+      title: it.name || "item",
+      typeLabel: it.type || kind,
+      badge: it.display || it.kind || it.status || "Ready",
+      badgeKind: it.kind || "running",
+      meta: (it.meta || it.age || it.namespace || ""),
+      ageSeconds: it.ageSeconds || 0,
+      sev: sevOf(it.kind),
+      targetKind: kind,
+      target: it.name || "",
+      remoteHint: 80,
+      rawItem: it,
+      lines: genericLines(it)
+    }
+  }
+
+  function genericLines(it) {
+    var out = []
+    if (it.age) out.push("Age: " + it.age)
+    for (var k in it) {
+      if (k === "name" || k === "kind" || k === "display" || k === "age" || k === "ageSeconds") continue
+      var val = it[k]
+      if (typeof val === "string" || typeof val === "number" || typeof val === "boolean") {
+        out.push(k + ": " + val)
+      }
+    }
+    return out
   }
 
   function podLines(p) {
@@ -262,20 +344,37 @@ Panel {
   }
 
   function filteredWorkloads() {
-    if (!isResourceTab()) return []
-    var items = wlItems(activeTab)
-    var q = searchField.text.trim().toLowerCase()
+    if (topMode !== "workloads") return []
+    var w = backend.workloads
+    if (!w) return []
+    var kinds = availableResourceKinds()
     var rows = []
-    for (var i = 0; i < items.length; i++) {
-      var r = normRow(activeTab, items[i])
-      if (q !== "" && r.title.toLowerCase().indexOf(q) === -1
-          && r.badge.toLowerCase().indexOf(q) === -1
-          && r.meta.toLowerCase().indexOf(q) === -1) continue
-      rows.push(r)
+    var q = searchField.text.trim().toLowerCase()
+
+    for (var i = 0; i < kinds.length; i++) {
+      var kid = kinds[i].id
+      if (selectedResourceKind !== "all" && selectedResourceKind !== kid) continue
+      var list = w[kid] || []
+      for (var j = 0; j < list.length; j++) {
+        var r = normRow(kid, list[j])
+        if (q !== "") {
+          var match = r.title.toLowerCase().indexOf(q) >= 0 ||
+                      r.badge.toLowerCase().indexOf(q) >= 0 ||
+                      (r.typeLabel && r.typeLabel.toLowerCase().indexOf(q) >= 0) ||
+                      r.meta.toLowerCase().indexOf(q) >= 0
+          if (!match) continue
+        }
+        rows.push(r)
+      }
     }
-    if (sortMode === "Name") rows.sort(function(a, b) { return a.title < b.title ? -1 : (a.title > b.title ? 1 : 0) })
-    else if (sortMode === "Age") rows.sort(function(a, b) { return a.ageSeconds - b.ageSeconds })
-    else rows.sort(function(a, b) { return (a.sev - b.sev) || (a.title < b.title ? -1 : (a.title > b.title ? 1 : 0)) })
+
+    if (sortMode === "Name") {
+      rows.sort(function(a, b) { return a.title < b.title ? -1 : (a.title > b.title ? 1 : 0) })
+    } else if (sortMode === "Age") {
+      rows.sort(function(a, b) { return a.ageSeconds - b.ageSeconds })
+    } else {
+      rows.sort(function(a, b) { return (a.sev - b.sev) || (a.title < b.title ? -1 : (a.title > b.title ? 1 : 0)) })
+    }
     return rows
   }
 
@@ -352,11 +451,16 @@ Panel {
   Connections {
     target: backend
     function onLogLinesChanged() {
-      if (backend.logFollow && root.activeTab === "Logs" && root.opened) {
+      if (backend.logFollow && root.topMode === "logs" && root.opened) {
         Qt.callLater(function() { root.scrollLogToBottom() })
       }
     }
     function onActiveNamespaceChanged() { root.pulseWlList() }
+    function onWorkloadsFreshChanged() {
+      if (backend.workloadsFresh && root.topMode === "logs" && backend.logPod === "") {
+        root.ensureLogPod()
+      }
+    }
   }
 
   NumberAnimation {
@@ -371,7 +475,7 @@ Panel {
   // Log follow polling: tail refreshes while the Logs tab is open.
   Timer {
     interval: 5000
-    running: root.opened && root.activeTab === "Logs" && backend.logFollow && !backend.logsLoading && backend.logPod !== ""
+    running: root.opened && root.topMode === "logs" && backend.logFollow && !backend.logsLoading && backend.logPod !== ""
     repeat: true
     onTriggered: backend.fetchLogs()
   }
@@ -395,6 +499,9 @@ Panel {
     function toggle(): void { root.toggle() }
     function refresh(): string { backend.refresh(); return "ok" }
     function status(): string { return String(backend.healthStatus) }
+    function expand(key: string): void { backend.expandedKey = key }
+    function setMode(mode: string): void { root.topMode = mode }
+    function setLogPod(pod: string): void { backend.setLogPod(pod); root.topMode = "logs" }
   }
 
   // ---- bar pill: k8s mark + health dot + short label, sized to content ----
@@ -468,8 +575,8 @@ Panel {
     bar: root.bar
     open: root.opened
     focusTarget: keyCatcher
-    contentWidth: Math.min(Style.space(490), panel.fittedContentWidth(Style.space(490)))
-    contentHeight: panel.fittedContentHeight(column.implicitHeight + Style.space(16), Style.space(580))
+    contentWidth: Math.min(Style.space(520), panel.fittedContentWidth(Style.space(520)))
+    contentHeight: panel.fittedContentHeight(column.implicitHeight + Style.space(20), Style.space(640))
 
     PanelKeyCatcher {
       id: keyCatcher
@@ -485,7 +592,7 @@ Panel {
       Flickable {
         anchors.fill: parent
         contentWidth: width
-        contentHeight: column.implicitHeight + Style.space(16)
+        contentHeight: column.implicitHeight + Style.space(20)
         clip: true
         boundsBehavior: Flickable.StopAtBounds
         flickableDirection: Flickable.VerticalFlick
@@ -635,9 +742,48 @@ Panel {
               }
             }
 
+            // ---- top mode bar: Workloads | Events | Logs ----
+            RowLayout {
+              width: parent.width
+              spacing: Style.space(6)
+
+              Button {
+                Layout.fillWidth: true
+                text: "Workloads (" + root.totalWorkloadCount() + ")"
+                fontSize: Style.font.bodySmall
+                selected: root.topMode === "workloads"
+                bordered: true
+                onClicked: root.topMode = "workloads"
+              }
+
+              Button {
+                Layout.fillWidth: true
+                text: "Events (" + (backend.events ? backend.events.length : 0) + ")"
+                fontSize: Style.font.bodySmall
+                selected: root.topMode === "events"
+                bordered: true
+                onClicked: {
+                  root.topMode = "events"
+                  backend.fetchEvents()
+                }
+              }
+
+              Button {
+                Layout.fillWidth: true
+                text: "Logs"
+                fontSize: Style.font.bodySmall
+                selected: root.topMode === "logs"
+                bordered: true
+                onClicked: {
+                  root.topMode = "logs"
+                  root.ensureLogPod()
+                }
+              }
+            }
+
             // ---- workloads skeleton ----
             Column {
-              visible: backend.workloadsLoading && !backend.workloadsFresh
+              visible: root.topMode === "workloads" && backend.workloadsLoading && !backend.workloadsFresh
               width: parent.width
               spacing: Style.space(6)
               Repeater {
@@ -658,29 +804,40 @@ Panel {
               }
             }
 
-            // ---- workloads: tabs + rows ----
+            // ---- workloads: kind filters + list ----
             Column {
-              visible: backend.workloadsFresh && backend.workloadsError === ""
+              visible: root.topMode === "workloads" && backend.workloadsFresh && backend.workloadsError === ""
               width: parent.width
               spacing: Style.space(8)
 
+              // Dynamic Resource Kinds filter bar (Pods, Deployments, Services, CRDs, etc.)
               Flickable {
-                id: wlTabFlick
+                id: kindFlick
                 width: parent.width
-                height: wlTabRow.height
-                contentWidth: wlTabRow.width
+                height: kindRow.height
+                contentWidth: kindRow.width
                 clip: true
                 boundsBehavior: Flickable.StopAtBounds
                 flickableDirection: Flickable.HorizontalFlick
                 interactive: contentWidth > width
+
                 Row {
-                  id: wlTabRow
-                  spacing: Style.space(4)
+                  id: kindRow
+                  spacing: Style.space(6)
+
+                  Chip {
+                    label: "All (" + root.totalWorkloadCount() + ")"
+                    active: root.selectedResourceKind === "all"
+                    onClicked: root.selectedResourceKind = "all"
+                  }
+
                   Repeater {
-                    model: root.wlTabs
-                    WlTab {
+                    model: root.availableResourceKinds()
+                    Chip {
                       required property var modelData
-                      tab: String(modelData)
+                      label: modelData.label + " (" + modelData.count + ")"
+                      active: root.selectedResourceKind === modelData.id
+                      onClicked: root.selectedResourceKind = modelData.id
                     }
                   }
                 }
@@ -690,14 +847,13 @@ Panel {
                 width: parent.width
                 Text {
                   textFormat: Text.PlainText
-                  text: root.activeTab === "Logs" ? "Pod Logs" : (root.activeTab === "Events" ? "Recent Events" : (root.activeTab + " · " + backend.activeNamespace))
+                  text: (root.selectedResourceKind === "all" ? "All workloads" : root.selectedResourceKind.toUpperCase()) + " in " + backend.activeNamespace
                   color: root.dim
                   font.family: root.fontFamily
                   font.pixelSize: Style.font.caption
                 }
                 Item { Layout.fillWidth: true; height: 1 }
                 Text {
-                  visible: root.isResourceTab()
                   textFormat: Text.PlainText
                   text: "Sort: " + root.sortMode + " ▾"
                   color: root.dim
@@ -714,7 +870,6 @@ Panel {
 
               Column {
                 id: wlColumn
-                visible: root.isResourceTab()
                 width: parent.width
                 spacing: Style.space(6)
                 Repeater {
@@ -729,9 +884,9 @@ Panel {
                 }
               }
 
-              // Genuinely composed empty state per tab/filter.
+              // Empty state
               Column {
-                visible: root.isResourceTab() && root.filteredWorkloads().length === 0
+                visible: root.filteredWorkloads().length === 0
                 width: parent.width
                 spacing: Style.space(4)
                 Text {
@@ -745,7 +900,7 @@ Panel {
                   width: parent.width
                   horizontalAlignment: Text.AlignHCenter
                   textFormat: Text.PlainText
-                  text: searchField.text.trim() !== "" ? "No match for “" + searchField.text.trim() + "”" : "All clear — nothing running here"
+                  text: searchField.text.trim() !== "" ? "No match for “" + searchField.text.trim() + "”" : "No resources found in " + backend.activeNamespace
                   color: root.foreground
                   font.family: root.fontFamily
                   font.pixelSize: Style.font.body
@@ -755,64 +910,95 @@ Panel {
                   width: parent.width
                   horizontalAlignment: Text.AlignHCenter
                   textFormat: Text.PlainText
-                  text: root.activeTab + " · " + backend.activeNamespace
+                  text: (root.selectedResourceKind === "all" ? "All types" : root.selectedResourceKind) + " · " + backend.activeNamespace
                   color: root.dim
                   font.family: root.fontFamily
                   font.pixelSize: Style.font.caption
                 }
               }
+            }
 
-              // ---- events view ----
+            // ---- events view ----
+            Column {
+              visible: root.topMode === "events"
+              width: parent.width
+              spacing: Style.space(6)
+
+              RowLayout {
+                width: parent.width
+                Text {
+                  textFormat: Text.PlainText
+                  text: "Events in " + backend.activeNamespace
+                  color: root.dim
+                  font.family: root.fontFamily
+                  font.pixelSize: Style.font.caption
+                }
+                Item { Layout.fillWidth: true; height: 1 }
+                Button {
+                  text: "Refresh"
+                  fontSize: Style.font.caption
+                  horizontalPadding: Style.space(8)
+                  verticalPadding: Style.space(2)
+                  bordered: true
+                  onClicked: backend.fetchEvents()
+                }
+              }
+
               Column {
-                visible: root.activeTab === "Events"
                 width: parent.width
                 spacing: Style.space(6)
-
-                Column {
-                  width: parent.width
-                  spacing: Style.space(6)
-                  Repeater {
-                    model: root.filteredEvents()
-                    EventRow {
-                      required property var modelData
-                      required property int index
-                      width: parent.width
-                      ev: modelData
-                      rowIndex: index
-                    }
-                  }
-                }
-
-                Column {
-                  visible: !backend.eventsLoading && root.filteredEvents().length === 0
-                  width: parent.width
-                  spacing: Style.space(4)
-                  Text {
+                Repeater {
+                  model: root.filteredEvents()
+                  EventRow {
+                    required property var modelData
+                    required property int index
                     width: parent.width
-                    horizontalAlignment: Text.AlignHCenter
-                    text: "○"
-                    color: root.dim
-                    font.pixelSize: Style.font.display
-                  }
-                  Text {
-                    width: parent.width
-                    horizontalAlignment: Text.AlignHCenter
-                    textFormat: Text.PlainText
-                    text: "No events here"
-                    color: root.foreground
-                    font.family: root.fontFamily
-                    font.pixelSize: Style.font.body
-                    font.bold: true
+                    ev: modelData
+                    rowIndex: index
                   }
                 }
               }
 
-              // ---- logs view ----
               Column {
-                visible: root.activeTab === "Logs"
+                visible: !backend.eventsLoading && root.filteredEvents().length === 0
                 width: parent.width
-                spacing: Style.space(8)
+                spacing: Style.space(4)
+                Text {
+                  width: parent.width
+                  horizontalAlignment: Text.AlignHCenter
+                  text: "○"
+                  color: root.dim
+                  font.pixelSize: Style.font.display
+                }
+                Text {
+                  width: parent.width
+                  horizontalAlignment: Text.AlignHCenter
+                  textFormat: Text.PlainText
+                  text: "No events in " + backend.activeNamespace
+                  color: root.foreground
+                  font.family: root.fontFamily
+                  font.pixelSize: Style.font.body
+                  font.bold: true
+                }
+              }
+            }
 
+            // ---- logs view ----
+            Column {
+              visible: root.topMode === "logs"
+              width: parent.width
+              spacing: Style.space(8)
+
+              // Pod picker
+              Column {
+                width: parent.width
+                spacing: Style.space(4)
+                Text {
+                  text: "SELECT POD"
+                  color: root.dim
+                  font.bold: true
+                  font.pixelSize: Style.font.caption
+                }
                 Flickable {
                   width: parent.width
                   height: logPodRow.height
@@ -835,112 +1021,135 @@ Panel {
                     }
                   }
                 }
+              }
 
-                Flickable {
-                  visible: backend.logContainers.length > 1
-                  width: parent.width
-                  height: logCtrRow.height
-                  contentWidth: logCtrRow.width
-                  clip: true
-                  boundsBehavior: Flickable.StopAtBounds
-                  flickableDirection: Flickable.HorizontalFlick
-                  interactive: contentWidth > width
-                  Row {
-                    id: logCtrRow
-                    spacing: Style.space(4)
-                    Repeater {
-                      model: backend.logContainers
-                      Chip {
-                        required property var modelData
-                        label: String(modelData)
-                        active: backend.logContainer === String(modelData)
-                        onClicked: backend.setLogContainer(String(modelData))
-                      }
-                    }
-                  }
+              // Container picker (if pod has multiple containers)
+              Column {
+                visible: backend.logContainers.length > 1
+                width: parent.width
+                spacing: Style.space(4)
+                Text {
+                  text: "CONTAINER"
+                  color: root.dim
+                  font.bold: true
+                  font.pixelSize: Style.font.caption
                 }
-
-                RowLayout {
-                  width: parent.width
+                Row {
+                  id: logCtrRow
                   spacing: Style.space(4)
-                  TextField {
-                    id: logSearchField
-                    Layout.fillWidth: true
-                    foreground: root.foreground
-                    placeholderText: "Search logs…"
-                    text: root.logSearch
-                    onTextChanged: {
-                      root.logSearch = text
-                      root.currentMatchLine = -1
-                      var m = root.logMatchLines()
-                      if (m.length > 0) {
-                        root.currentMatchLine = m[0]
-                        root.scrollLogTo(m[0])
-                      }
+                  Repeater {
+                    model: backend.logContainers
+                    Chip {
+                      required property var modelData
+                      label: String(modelData)
+                      active: backend.logContainer === String(modelData)
+                      onClicked: backend.setLogContainer(String(modelData))
                     }
-                    Keys.onPressed: function(event) {
-                      if (event.key === Qt.Key_Escape) { clear(); keyCatcher.forceActiveFocus(); event.accepted = true }
-                      else if (event.key === Qt.Key_Return || event.key === Qt.Key_Enter) { root.stepMatch(1); event.accepted = true }
-                    }
-                  }
-                  Text {
-                    visible: root.logSearch.trim() !== ""
-                    textFormat: Text.PlainText
-                    text: {
-                      var m = root.logMatchLines()
-                      if (m.length === 0) return "0/0"
-                      var pos = m.indexOf(root.currentMatchLine) + 1
-                      return (pos <= 0 ? "–" : pos) + "/" + m.length
-                    }
-                    color: root.dim
-                    font.family: root.fontFamily
-                    font.pixelSize: Style.font.caption
-                  }
-                  Chip {
-                    label: "‹"
-                    onClicked: root.stepMatch(-1)
-                  }
-                  Chip {
-                    label: "›"
-                    onClicked: root.stepMatch(1)
                   }
                 }
+              }
 
-                RowLayout {
-                  width: parent.width
-                  spacing: Style.space(4)
-                  Chip {
-                    label: backend.logFollow ? "Follow: on" : "Follow: off"
-                    active: backend.logFollow
-                    onClicked: {
-                      backend.logFollow = !backend.logFollow
-                      if (backend.logFollow) { backend.fetchLogs(); root.scrollLogToBottom() }
+              // Log Search input
+              RowLayout {
+                width: parent.width
+                spacing: Style.space(4)
+                TextField {
+                  id: logSearchField
+                  Layout.fillWidth: true
+                  foreground: root.foreground
+                  placeholderText: "Search in logs…"
+                  text: root.logSearch
+                  onTextChanged: {
+                    root.logSearch = text
+                    root.currentMatchLine = -1
+                    var m = root.logMatchLines()
+                    if (m.length > 0) {
+                      root.currentMatchLine = m[0]
+                      root.scrollLogTo(m[0])
                     }
                   }
-                  Chip {
-                    label: "Reload"
-                    onClicked: backend.fetchLogs()
-                  }
-                  Chip {
-                    label: "Export"
-                    onClicked: backend.exportLogs(String(backend.setting("logExportDir", "") || ""))
-                  }
-                  Item { Layout.fillWidth: true; height: 1 }
-                  Text {
-                    visible: backend.logPod !== ""
-                    textFormat: Text.PlainText
-                    text: backend.logPod + (backend.logContainer !== "" ? " / " + backend.logContainer : "")
-                    color: root.dim
-                    font.family: root.fontFamily
-                    font.pixelSize: Style.font.caption
-                    elide: Text.ElideRight
+                  Keys.onPressed: function(event) {
+                    if (event.key === Qt.Key_Escape) { clear(); keyCatcher.forceActiveFocus(); event.accepted = true }
+                    else if (event.key === Qt.Key_Return || event.key === Qt.Key_Enter) { root.stepMatch(1); event.accepted = true }
                   }
                 }
+                Text {
+                  visible: root.logSearch.trim() !== ""
+                  textFormat: Text.PlainText
+                  text: {
+                    var m = root.logMatchLines()
+                    if (m.length === 0) return "0/0"
+                    var pos = m.indexOf(root.currentMatchLine) + 1
+                    return (pos <= 0 ? "–" : pos) + "/" + m.length
+                  }
+                  color: root.dim
+                  font.family: root.fontFamily
+                  font.pixelSize: Style.font.caption
+                }
+                Button {
+                  text: "‹"
+                  fontSize: Style.font.bodySmall
+                  horizontalPadding: Style.space(8)
+                  bordered: true
+                  onClicked: root.stepMatch(-1)
+                }
+                Button {
+                  text: "›"
+                  fontSize: Style.font.bodySmall
+                  horizontalPadding: Style.space(8)
+                  bordered: true
+                  onClicked: root.stepMatch(1)
+                }
+              }
+
+              // Controls: Live Follow, Reload, Export
+              RowLayout {
+                width: parent.width
+                spacing: Style.space(6)
+                Button {
+                  text: backend.logFollow ? "Live: ON" : "Live: OFF"
+                  selected: backend.logFollow
+                  bordered: true
+                  onClicked: {
+                    backend.logFollow = !backend.logFollow
+                    if (backend.logFollow) { backend.fetchLogs(); root.scrollLogToBottom() }
+                  }
+                }
+                Button {
+                  text: "Reload"
+                  bordered: true
+                  onClicked: backend.fetchLogs()
+                }
+                Button {
+                  text: "Export"
+                  bordered: true
+                  onClicked: backend.exportLogs(String(backend.setting("logExportDir", "") || ""))
+                }
+                Item { Layout.fillWidth: true; height: 1 }
+                Text {
+                  visible: backend.logPod !== ""
+                  textFormat: Text.PlainText
+                  text: backend.logPod + (backend.logContainer !== "" ? " / " + backend.logContainer : "")
+                  color: root.dim
+                  font.family: root.fontFamily
+                  font.pixelSize: Style.font.caption
+                  elide: Text.ElideRight
+                }
+              }
+
+              // Terminal container
+              BorderSurface {
+                width: parent.width
+                height: Style.space(320)
+                radius: Style.cornerRadius
+                color: Color.surface || "#111318"
+                borderSpec: Border.controlSpec("normal", root.dim, root.accent)
+                clip: true
 
                 Flickable {
                   id: logFlick
-                  width: parent.width
-                  height: Math.min(logLinesColumn.implicitHeight, Style.space(300))
+                  anchors.fill: parent
+                  anchors.margins: Style.space(8)
                   contentWidth: width
                   contentHeight: logLinesColumn.implicitHeight
                   clip: true
@@ -950,7 +1159,7 @@ Panel {
                   Column {
                     id: logLinesColumn
                     width: logFlick.width
-                    spacing: 1
+                    spacing: 2
                     Repeater {
                       model: backend.logLines
                       Text {
@@ -961,22 +1170,44 @@ Panel {
                         text: Model.renderLogLine(modelData, root.logSearch, index === root.currentMatchLine, root.logPalette)
                         font.family: "monospace"
                         font.pixelSize: Style.font.caption
-                        wrapMode: Text.WrapAnywhere
+                        wrapMode: Text.WrapAtWordBoundaryOrAnywhere
                       }
                     }
                   }
                 }
+              }
 
-                Text {
-                  visible: backend.logPod === ""
-                  width: parent.width
-                  horizontalAlignment: Text.AlignHCenter
-                  textFormat: Text.PlainText
-                  text: "Pick a pod above to tail its logs"
-                  color: root.dim
-                  font.family: root.fontFamily
-                  font.pixelSize: Style.font.bodySmall
-                }
+              Text {
+                visible: backend.logsLoading
+                width: parent.width
+                horizontalAlignment: Text.AlignHCenter
+                textFormat: Text.PlainText
+                text: "Loading logs for " + backend.logPod + "…"
+                color: root.dim
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.bodySmall
+              }
+
+              Text {
+                visible: !backend.logsLoading && backend.logPod !== "" && backend.logLines.length === 0
+                width: parent.width
+                horizontalAlignment: Text.AlignHCenter
+                textFormat: Text.PlainText
+                text: "No log output for " + backend.logPod
+                color: root.dim
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.bodySmall
+              }
+
+              Text {
+                visible: backend.logPod === ""
+                width: parent.width
+                horizontalAlignment: Text.AlignHCenter
+                textFormat: Text.PlainText
+                text: "Pick a pod above to tail its logs"
+                color: root.dim
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.bodySmall
               }
             }
 
@@ -1515,40 +1746,6 @@ Panel {
     }
   }
 
-  component WlTab: CursorSurface {
-    id: wlTab
-    property string tab: ""
-
-    function labelText() {
-      if (wlTab.tab === "Logs") return "Logs"
-      var cnt = backend.tabCount(wlTab.tab)
-      return cnt > 0 ? (wlTab.tab + " " + cnt) : wlTab.tab
-    }
-
-    foreground: root.foreground
-    current: root.activeTab === wlTab.tab
-    implicitWidth: tabLabel.implicitWidth + Style.space(14)
-    implicitHeight: Style.space(28)
-
-    Text {
-      id: tabLabel
-      anchors.centerIn: parent
-      textFormat: Text.PlainText
-      text: wlTab.labelText()
-      color: root.activeTab === wlTab.tab ? root.foreground : root.dim
-      font.family: root.fontFamily
-      font.pixelSize: Style.font.bodySmall
-      font.bold: root.activeTab === wlTab.tab
-    }
-
-    MouseArea {
-      anchors.fill: parent
-      hoverEnabled: true
-      cursorShape: Qt.PointingHandCursor
-      onClicked: root.switchTab(wlTab.tab)
-    }
-  }
-
   component WorkloadRow: CursorSurface {
     id: wlRow
     property var row: null
@@ -1557,21 +1754,18 @@ Panel {
     readonly property color badgeColor: Model.healthColor(wlRow.row ? wlRow.row.badgeKind : "unknown", root.foreground, root.urgent, root.accent)
 
     foreground: root.foreground
-    implicitHeight: wlInner.implicitHeight + Style.spacing.rowPaddingX
-
-    // No creation-time animation: list models refresh silently in the
-    // background, and replaying a fade on every poll is what made the
-    // whole panel flash. User-initiated switches fade via wlListFade.
+    height: implicitHeight
+    implicitHeight: wlInner.implicitHeight + Style.space(8)
 
     Column {
       id: wlInner
       anchors.left: parent.left
       anchors.right: parent.right
-      anchors.verticalCenter: parent.verticalCenter
-      anchors.leftMargin: Style.space(10)
-      anchors.rightMargin: Style.space(10)
-      spacing: Style.space(4)
+      anchors.top: parent.top
+      anchors.margins: Style.space(8)
+      spacing: Style.space(6)
 
+      // Header row
       Item {
         id: wlHeaderArea
         width: parent.width
@@ -1592,17 +1786,38 @@ Panel {
 
           ColumnLayout {
             Layout.fillWidth: true
-            spacing: 1
-            Text {
+            spacing: 2
+            RowLayout {
               Layout.fillWidth: true
-              textFormat: Text.PlainText
-              text: wlRow.row ? String(wlRow.row.title) : ""
-              color: root.foreground
-              font.family: root.fontFamily
-              font.pixelSize: Style.font.body
-              font.weight: Font.DemiBold
-              elide: Text.ElideRight
+              spacing: Style.space(6)
+              Text {
+                Layout.fillWidth: true
+                textFormat: Text.PlainText
+                text: wlRow.row ? String(wlRow.row.title) : ""
+                color: root.foreground
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.body
+                font.weight: Font.DemiBold
+                elide: Text.ElideRight
+              }
+              // Type tag
+              BorderSurface {
+                visible: wlRow.row && wlRow.row.typeLabel
+                radius: Style.cornerRadius
+                color: Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, 0.08)
+                width: typeLabelText.implicitWidth + Style.space(8)
+                height: typeLabelText.implicitHeight + Style.space(4)
+                Text {
+                  id: typeLabelText
+                  anchors.centerIn: parent
+                  text: wlRow.row ? wlRow.row.typeLabel : ""
+                  color: root.dim
+                  font.family: root.fontFamily
+                  font.pixelSize: Style.font.caption - 1
+                }
+              }
             }
+
             Text {
               Layout.fillWidth: true
               textFormat: Text.PlainText
@@ -1614,14 +1829,23 @@ Panel {
             }
           }
 
-          Text {
+          // Badge
+          BorderSurface {
             Layout.alignment: Qt.AlignVCenter
-            textFormat: Text.PlainText
-            text: wlRow.row ? String(wlRow.row.badge) : ""
-            color: wlRow.badgeColor
-            font.family: root.fontFamily
-            font.pixelSize: Style.font.bodySmall
-            font.bold: true
+            radius: Style.cornerRadius
+            color: Qt.rgba(wlRow.badgeColor.r, wlRow.badgeColor.g, wlRow.badgeColor.b, 0.15)
+            width: badgeText.implicitWidth + Style.space(12)
+            height: badgeText.implicitHeight + Style.space(6)
+            Text {
+              id: badgeText
+              anchors.centerIn: parent
+              textFormat: Text.PlainText
+              text: wlRow.row ? String(wlRow.row.badge) : ""
+              color: wlRow.badgeColor
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.caption
+              font.bold: true
+            }
           }
 
           Text {
@@ -1631,6 +1855,7 @@ Panel {
             color: root.dim
             font.family: root.fontFamily
             font.pixelSize: Style.font.caption
+            font.bold: true
           }
         }
 
@@ -1642,99 +1867,299 @@ Panel {
         }
       }
 
-      Column {
+      // Expanded Detail Section
+      BorderSurface {
         visible: wlRow.expanded
         width: parent.width
-        spacing: Style.space(4)
-        Rectangle {
-          width: parent.width
-          height: 1
-          color: root.dim
-          opacity: 0.25
-        }
-        Repeater {
-          model: wlRow.expanded && wlRow.row ? wlRow.row.lines : []
-          Text {
-            required property var modelData
-            width: parent.width
-            textFormat: Text.PlainText
-            text: "  " + String(modelData)
-            color: root.dim
-            font.family: root.fontFamily
-            font.pixelSize: Style.font.caption
-            elide: Text.ElideRight
-            wrapMode: Text.WordWrap
-          }
-        }
+        height: wlExpandedInner.implicitHeight + Style.space(20)
+        radius: Style.cornerRadius
+        color: Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, 0.03)
+        borderSpec: Border.controlSpec("normal", root.dim, root.accent)
 
-        // Quick actions (hidden in read-only mode).
-        Row {
-          visible: wlRow.expanded && wlRow.row && !backend.readOnly && root.rowActions(wlRow.row).length > 0
-          width: parent.width
-          spacing: Style.space(6)
-          Repeater {
-            model: wlRow.expanded && wlRow.row ? root.rowActions(wlRow.row) : []
-            Chip {
-              required property var modelData
-              label: root.actionLabel(String(modelData))
-              danger: String(modelData) === "kill"
-              onClicked: root.runRowAction(wlRow.row, String(modelData))
-            }
-          }
-        }
-
-        // Inline port-forward form.
         Column {
-          visible: wlRow.expanded && wlRow.row && root.forwardFormKey === String(wlRow.row.key)
-          width: parent.width
-          spacing: Style.space(6)
-          RowLayout {
+          id: wlExpandedInner
+          anchors.left: parent.left
+          anchors.right: parent.right
+          anchors.top: parent.top
+          anchors.margins: Style.space(10)
+          spacing: Style.space(8)
+
+          // 1. Pod Containers (if it's a pod with containers)
+          Column {
+            visible: wlRow.row && wlRow.row.rawPod && wlRow.row.rawPod.containers && wlRow.row.rawPod.containers.length > 0
             width: parent.width
-            spacing: Style.space(6)
+            spacing: Style.space(4)
+
             Text {
-              textFormat: Text.PlainText
-              text: "localhost:"
+              text: "CONTAINERS (" + (wlRow.row && wlRow.row.rawPod ? wlRow.row.rawPod.containers.length : 0) + ")"
               color: root.dim
               font.family: root.fontFamily
               font.pixelSize: Style.font.caption
+              font.bold: true
             }
-            TextField {
-              Layout.preferredWidth: Style.space(72)
-              foreground: root.foreground
-              placeholderText: "local"
-              text: root.forwardFormKey === String(wlRow.row.key) ? root.fwLocal : ""
-              onTextChanged: if (root.forwardFormKey === String(wlRow.row.key)) root.fwLocal = text
-            }
-            Text {
-              textFormat: Text.PlainText
-              text: "→ remote :"
-              color: root.dim
-              font.family: root.fontFamily
-              font.pixelSize: Style.font.caption
-            }
-            TextField {
-              Layout.preferredWidth: Style.space(72)
-              foreground: root.foreground
-              placeholderText: "remote"
-              text: root.forwardFormKey === String(wlRow.row.key) ? root.fwRemote : ""
-              onTextChanged: if (root.forwardFormKey === String(wlRow.row.key)) root.fwRemote = text
-            }
-            Item { Layout.fillWidth: true; height: 1 }
-          }
-          Row {
-            width: parent.width
-            spacing: Style.space(6)
-            Chip {
-              label: "Start"
-              active: true
-              onClicked: {
-                if (wlRow.row) backend.startForward(String(wlRow.row.targetKind), String(wlRow.row.target), root.fwLocal, root.fwRemote)
-                root.forwardFormKey = ""
+
+            Repeater {
+              model: (wlRow.expanded && wlRow.row && wlRow.row.rawPod) ? wlRow.row.rawPod.containers : []
+              BorderSurface {
+                required property var modelData
+                width: parent.width
+                height: ctrRowLayout.implicitHeight + Style.space(12)
+                radius: Style.cornerRadius
+                color: Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, 0.05)
+                borderSpec: Border.controlSpec("normal", root.dim, root.accent)
+
+                RowLayout {
+                  id: ctrRowLayout
+                  anchors.left: parent.left
+                  anchors.right: parent.right
+                  anchors.verticalCenter: parent.verticalCenter
+                  anchors.leftMargin: Style.space(8)
+                  anchors.rightMargin: Style.space(8)
+                  spacing: Style.space(6)
+
+                  Rectangle {
+                    width: Style.space(8); height: Style.space(8); radius: width / 2
+                    color: modelData.ready ? Model.STATUS_HEALTHY : root.urgent
+                  }
+
+                  Text {
+                    text: modelData.name
+                    color: root.foreground
+                    font.family: root.fontFamily
+                    font.pixelSize: Style.font.bodySmall
+                    font.bold: true
+                  }
+
+                  Text {
+                    text: Model.shortImage(modelData.image)
+                    color: root.dim
+                    font.family: "monospace"
+                    font.pixelSize: Style.font.caption
+                    Layout.fillWidth: true
+                    elide: Text.ElideRight
+                  }
+
+                  Text {
+                    text: modelData.state + (modelData.restarts > 0 ? (" · " + modelData.restarts + "r") : "")
+                    color: root.dim
+                    font.family: root.fontFamily
+                    font.pixelSize: Style.font.caption
+                  }
+
+                  Button {
+                    text: "Logs"
+                    fontSize: Style.font.caption
+                    horizontalPadding: Style.space(8)
+                    verticalPadding: Style.space(2)
+                    bordered: true
+                    onClicked: {
+                      backend.setLogPod(wlRow.row.target)
+                      backend.setLogContainer(modelData.name)
+                      root.topMode = "logs"
+                    }
+                  }
+                }
               }
             }
-            Chip {
-              label: "Cancel"
-              onClicked: root.forwardFormKey = ""
+          }
+
+          // 2. Pod Conditions (status pills)
+          Column {
+            visible: wlRow.row && wlRow.row.rawPod && wlRow.row.rawPod.conditions && wlRow.row.rawPod.conditions.length > 0
+            width: parent.width
+            spacing: Style.space(4)
+
+            Text {
+              text: "CONDITIONS"
+              color: root.dim
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.caption
+              font.bold: true
+            }
+
+            Flow {
+              width: parent.width
+              spacing: Style.space(4)
+              Repeater {
+                model: (wlRow.expanded && wlRow.row && wlRow.row.rawPod) ? wlRow.row.rawPod.conditions : []
+                BorderSurface {
+                  required property var modelData
+                  radius: Style.cornerRadius
+                  color: modelData.status === "True" ? Qt.rgba(0.27, 0.65, 0.35, 0.15) : Qt.rgba(0.9, 0.28, 0.3, 0.18)
+                  borderSpec: Border.controlSpec("normal", modelData.status === "True" ? Model.STATUS_HEALTHY : root.urgent, root.accent)
+                  width: cndRow.implicitWidth + Style.space(12)
+                  height: cndRow.implicitHeight + Style.space(6)
+                  Row {
+                    id: cndRow
+                    anchors.centerIn: parent
+                    spacing: Style.space(4)
+                    Text {
+                      text: modelData.status === "True" ? "✔" : "✕"
+                      color: modelData.status === "True" ? Model.STATUS_HEALTHY : root.urgent
+                      font.pixelSize: Style.font.caption
+                    }
+                    Text {
+                      text: modelData.type
+                      color: modelData.status === "True" ? root.foreground : root.urgent
+                      font.family: root.fontFamily
+                      font.pixelSize: Style.font.caption
+                      font.bold: modelData.status !== "True"
+                    }
+                  }
+                }
+              }
+            }
+          }
+
+          // 3. Generic details (for non-pod resources or CRDs)
+          Column {
+            visible: !wlRow.row || !wlRow.row.rawPod
+            width: parent.width
+            spacing: Style.space(3)
+            Repeater {
+              model: (wlRow.expanded && wlRow.row && !wlRow.row.rawPod) ? wlRow.row.lines : []
+              Text {
+                required property var modelData
+                width: parent.width
+                textFormat: Text.PlainText
+                text: String(modelData)
+                color: root.dim
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.caption
+                elide: Text.ElideRight
+              }
+            }
+          }
+
+          // 4. Action Buttons Bar
+          RowLayout {
+            visible: !backend.readOnly
+            width: parent.width
+            spacing: Style.space(6)
+
+            Button {
+              visible: wlRow.row && wlRow.row.targetKind === "pod"
+              text: "View Logs"
+              fontSize: Style.font.bodySmall
+              bordered: true
+              onClicked: {
+                backend.setLogPod(wlRow.row.target)
+                root.topMode = "logs"
+              }
+            }
+
+            Button {
+              visible: wlRow.row && (wlRow.row.targetKind === "pod" || wlRow.row.targetKind === "service")
+              text: "Port Forward"
+              fontSize: Style.font.bodySmall
+              bordered: true
+              selected: root.forwardFormKey === String(wlRow.row.key)
+              onClicked: {
+                root.fwLocal = String(wlRow.row.remoteHint || "8080")
+                root.fwRemote = String(wlRow.row.remoteHint || "8080")
+                root.forwardFormKey = root.forwardFormKey === String(wlRow.row.key) ? "" : String(wlRow.row.key)
+              }
+            }
+
+            Button {
+              visible: wlRow.row && (wlRow.row.targetKind === "deployment" || wlRow.row.targetKind === "statefulset" || wlRow.row.targetKind === "daemonset")
+              text: "Restart"
+              fontSize: Style.font.bodySmall
+              bordered: true
+              onClicked: root.runRowAction(wlRow.row, "restart")
+            }
+
+            Item { Layout.fillWidth: true; height: 1 }
+
+            Button {
+              visible: wlRow.row && wlRow.row.targetKind === "pod"
+              text: "Delete Pod"
+              fontSize: Style.font.bodySmall
+              foreground: root.urgent
+              bordered: true
+              onClicked: root.runRowAction(wlRow.row, "kill")
+            }
+          }
+
+          // 5. Inline Port-Forward Form
+          BorderSurface {
+            visible: wlRow.expanded && wlRow.row && root.forwardFormKey === String(wlRow.row.key)
+            width: parent.width
+            height: fwFormInner.implicitHeight + Style.space(16)
+            radius: Style.cornerRadius
+            color: Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, 0.05)
+            borderSpec: Border.controlSpec("normal", root.dim, root.accent)
+
+            Column {
+              id: fwFormInner
+              anchors.left: parent.left
+              anchors.right: parent.right
+              anchors.top: parent.top
+              anchors.margins: Style.space(8)
+              spacing: Style.space(6)
+
+              Text {
+                text: "PORT FORWARD"
+                color: root.dim
+                font.bold: true
+                font.pixelSize: Style.font.caption
+              }
+
+              RowLayout {
+                width: parent.width
+                spacing: Style.space(6)
+
+                Text {
+                  text: "localhost:"
+                  color: root.dim
+                  font.pixelSize: Style.font.bodySmall
+                }
+
+                TextField {
+                  Layout.preferredWidth: Style.space(80)
+                  foreground: root.foreground
+                  placeholderText: "local"
+                  text: root.forwardFormKey === String(wlRow.row.key) ? root.fwLocal : ""
+                  onTextChanged: if (root.forwardFormKey === String(wlRow.row.key)) root.fwLocal = text
+                }
+
+                Text {
+                  text: "→ remote :"
+                  color: root.dim
+                  font.pixelSize: Style.font.bodySmall
+                }
+
+                TextField {
+                  Layout.preferredWidth: Style.space(80)
+                  foreground: root.foreground
+                  placeholderText: "remote"
+                  text: root.forwardFormKey === String(wlRow.row.key) ? root.fwRemote : ""
+                  onTextChanged: if (root.forwardFormKey === String(wlRow.row.key)) root.fwRemote = text
+                }
+
+                Item { Layout.fillWidth: true; height: 1 }
+              }
+
+              RowLayout {
+                width: parent.width
+                spacing: Style.space(6)
+
+                Button {
+                  text: "Start Forward"
+                  selected: true
+                  bordered: true
+                  onClicked: {
+                    if (wlRow.row) backend.startForward(String(wlRow.row.targetKind), String(wlRow.row.target), root.fwLocal, root.fwRemote)
+                    root.forwardFormKey = ""
+                  }
+                }
+
+                Button {
+                  text: "Cancel"
+                  bordered: true
+                  onClicked: root.forwardFormKey = ""
+                }
+              }
             }
           }
         }

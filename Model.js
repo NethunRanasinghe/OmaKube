@@ -86,6 +86,13 @@ function firstPort(ports) {
   return m ? parseInt(m[1], 10) : 80
 }
 
+function shortImage(img) {
+  var s = String(img || "")
+  if (s === "") return ""
+  var slash = s.lastIndexOf("/")
+  return slash >= 0 ? s.slice(slash + 1) : s
+}
+
 function escapeHtml(s) {
   return String(s || "").replace(/&/g, "&amp;").replace(/</g, "&lt;")
     .replace(/>/g, "&gt;").replace(/"/g, "&quot;")
