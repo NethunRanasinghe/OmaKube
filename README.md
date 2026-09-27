@@ -5,30 +5,46 @@ anchored popup. No second surface. The popup is a `KeyboardPanel`
 layer-shell popup rendered in-process by `omarchy-shell` — verify with
 `hyprctl clients` (opening it must add no new client).
 
-## Layout
+## Architecture & Layout
 
 - `manifest.json` — id `omakube`, kind `bar-widget`, entry `Panel.qml`
-- `Panel.qml` — pill + full popup + right-click quick switcher
-- `Service.qml` — data owner, spawns `bin/omakube` per query
-- `Model.js` — pure helpers (labels, glyphs, accents, log rendering)
-- `OmakubeIcon.qml` — helm-mark icon, one stroke weight
+- `Panel.qml` — pill + high-density virtualized popup + quick context switcher
+- `Service.qml` — data owner, manages async processes and state
+- `Model.js` — pure helpers (labels, glyphs, accents, log rendering, categories)
+- `OmakubeIcon.qml` — helm-mark icon, single stroke weight
 - `backend/` — Go CLI (`client-go` + `apimachinery`), invoked per-query
 
-## What the popup does
+## High-Density Scalable Design
 
-- Health hero (live ring, accent glow) + context list with per-context
-  health; one-click switch (`use-context`), last context remembered
-- Namespace chips with failing counts; per-context namespace remembered
-- Workload tabs (Pods, Deploy, STS, DS, Svc, Jobs, Events, Logs) with
-  instant filter (`/`), status badges (color + shape), sort cycler,
-  inline row expansion
-- Events tab; pod log tail with containers, follow/pause, search +
-  highlight + match navigation, export to timestamped file
-- Quick actions (hidden in read-only mode): pod Logs jump, rollout
-  restart, kill pod (both with confirmation naming resource + namespace
-  + context), port-forward start/stop/stop-all with free-port fallback
-- Collapsible settings: kubeconfig override, default namespace, log dir,
-  refresh interval, read-only, debug logging, per-context accents
+Designed to scale seamlessly from 1 developer cluster (1–2 namespaces, 5 pods)
+to large enterprise multi-tenant clusters (100+ namespaces, 10,000+ pods, 50+ CRDs).
+
+- **Zone A: Smart Breadcrumb Bar (34px)**:
+  - `[☸ Context ▾]` — clickable dropdown with status, nodes/pods telemetry, latency badge, quick switch.
+  - `[⎈ Namespace ▾]` — searchable namespace popover with pod counts, failing badges (`✕`), and **All Namespaces (`*`)** support.
+  - `[⚡ Kind (Count) ▾]` — categorized resource picker (Workloads, Network, Config/Storage, Custom CRDs).
+  - Refresh indicator with latency monitor (`45ms`).
+- **Zone B: Unified Omnibar & Filter Strip (32px)**:
+  - Instant search (`/` to focus) with prefix syntax support (`@ns`, `:kind`).
+  - Sort cycler (`Status`, `Name`, `Age`).
+  - View density toggle (`Compact` 28px single-line vs `Comfort` two-line).
+- **Zone C: Dynamic Virtualized Canvas (~538px)**:
+  - **Workloads View:** Powered by virtualized `ListView` with delegate recycling. High data-ink ratio, inline container inspection, pod conditions, and quick actions (Logs, Port-Forward, Restart, Delete).
+  - **Events View:** Virtualized event stream with Warnings-only filter and instant text search.
+  - **Logs View:** Full-height terminal canvas (~460px), searchable pod selector dropdown, container picker, search highlight navigation (`‹`, `›`), live follow toggle, and export.
+  - **Port Forwards View:** Dedicated forward manager with active connection tracking, instant stop, and inline forward creator.
+  - **Settings View:** Clean two-column configuration form for kubeconfig, default namespace, export directory, refresh interval, and context accent colors.
+- **Zone D: Docked Bottom Navigation Rail (36px)**:
+  - Always visible regardless of scrolling: `[Workloads]` `[Events]` `[Logs]` `[⇄ Forwards]` `[⚙ Settings]`.
+  - Badges highlight event warnings and active forwards.
+
+## Dynamic Resource Discovery
+
+The backend uses `ServerPreferredResources()` and the dynamic client to dynamically discover and query:
+- Core workloads: Pods, Deployments, StatefulSets, DaemonSets, Services, Jobs, CronJobs
+- Networking & Config: Ingresses, ConfigMaps, Secrets, PVCs
+- Custom Resources (CRDs): Automatically queries custom resources installed on the cluster (e.g. `helmcharts`, `virtualservices`, `certificates`, etc.)
+- Multi-namespace querying: `--all-namespaces` / `--namespace "*"`
 
 ## Dev / test
 
@@ -50,5 +66,7 @@ go build -o bin/omakube ./backend   # run inside backend/
 ./bin/omakube contexts --json
 ./bin/omakube health --context <name> --timeout 8
 ./bin/omakube workloads --context <name> --namespace kube-system
+./bin/omakube workloads --context <name> --all-namespaces
+./bin/omakube events --context <name> --all-namespaces
 ./bin/omakube logs --context <name> --namespace <ns> --pod <pod> --tail 50
 ```

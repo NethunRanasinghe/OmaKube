@@ -86,6 +86,33 @@ function firstPort(ports) {
   return m ? parseInt(m[1], 10) : 80
 }
 
+function formatKindLabel(kind) {
+  var k = String(kind || "").toLowerCase()
+  if (k === "pods") return "Pods"
+  if (k === "deployments" || k === "deploy") return "Deployments"
+  if (k === "statefulsets" || k === "sts") return "StatefulSets"
+  if (k === "daemonsets" || k === "ds") return "DaemonSets"
+  if (k === "services" || k === "svc") return "Services"
+  if (k === "jobs") return "Jobs"
+  if (k === "cronjobs") return "CronJobs"
+  if (k === "ingresses" || k === "ing") return "Ingresses"
+  if (k === "configmaps" || k === "cm") return "ConfigMaps"
+  if (k === "secrets") return "Secrets"
+  if (k === "persistentvolumeclaims" || k === "pvc") return "PVCs"
+  if (k === "customresourcedefinitions" || k === "crds") return "CRDs"
+  return k.charAt(0).toUpperCase() + k.slice(1)
+}
+
+function resourceCategory(kind) {
+  var k = String(kind || "").toLowerCase()
+  if (k === "pods" || k === "deployments" || k === "statefulsets" || k === "daemonsets" || k === "jobs" || k === "cronjobs") return "Workloads"
+  if (k === "services" || k === "svc" || k === "ingresses" || k === "endpoints") return "Network"
+  if (k === "configmaps" || k === "secrets" || k === "cm") return "Config"
+  if (k === "pvc" || k === "persistentvolumeclaims" || k === "storageclasses") return "Storage"
+  return "Custom"
+}
+
+
 function shortImage(img) {
   var s = String(img || "")
   if (s === "") return ""

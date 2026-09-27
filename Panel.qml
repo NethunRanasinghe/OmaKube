@@ -7,12 +7,10 @@ import qs.Commons
 import qs.Ui
 import "Model.js" as Model
 
-// OmaKube — single bar-widget entry point. The ONLY UI surface is the
-// anchored popup below: pill (left-click) -> full popup, pill
-// (right-click) -> quick context switcher. Rendered in-process by
-// omarchy-shell as a KeyboardPanel layer-shell popup — never a separate
-// top-level window, never `omarchy-shell shell summon`. Verify with:
-//   hyprctl clients   # opening the popup must add no new client
+// OmaKube — Single anchored bar-widget popup for Omarchy.
+// Redesigned with maximum data-ink density, virtualized ListView engine,
+// dynamic Kubernetes resource discovery (CRDs, core resources),
+// instant searchable breadcrumbs, unified Omnibar, and dedicated full-height views.
 Panel {
   id: root
   moduleName: "omakube"
@@ -31,51 +29,83 @@ Panel {
     return Model.shortLabel(ctx ? ctx.shortLabel || ctx.name : "k8s")
   }
 
-  property bool quickOpened: false
-  property string toast: backend.actionStatus
-  property int quickIndex: 0
-  property string activeTab: "Pods"
-  readonly property var wlTabs: ["Pods", "Deploy", "STS", "DS", "Svc", "Jobs", "Events", "Logs"]
-  readonly property var resourceTabs: ["Pods", "Deploy", "STS", "DS", "Svc", "Jobs"]
-  property string topMode: "workloads" // "workloads" | "events" | "logs"
-  onTopModeChanged: {
-    if (topMode === "logs") ensureLogPod()
-    else if (topMode === "events") backend.fetchEvents()
-  }
+  // Navigation states
+  property string topMode: "workloads" // "workloads" | "events" | "logs" | "forwards" | "settings"
   property string selectedResourceKind: "all"
   property string sortMode: "Status" // Status | Name | Age
+  property bool compactMode: true
+  property bool eventsOnlyWarnings: false
+
+  // Pickers & Popovers
+  property bool contextPickerOpen: false
+  property bool nsPickerOpen: false
+  property bool kindPickerOpen: false
+  property bool logPodPickerOpen: false
+
+  function closeAllPickers() {
+    contextPickerOpen = false
+    nsPickerOpen = false
+    kindPickerOpen = false
+    logPodPickerOpen = false
+  }
+
+  // Quick context right-click popup
+  property bool quickOpened: false
+  property int quickIndex: 0
+
+  // Log viewer state
   property string logSearch: ""
   property int currentMatchLine: -1
+
+  // Port forward inline form
   property string forwardFormKey: ""
   property string fwLocal: ""
   property string fwRemote: ""
-  property bool settingsOpen: false
-  property bool contextsOpen: false
-  property bool namespacesOpen: false
-  // Pending destructive confirmation: {op, kind, name, label}
+
+  // Destructive action confirmation state
   property var confirmState: null
+
   readonly property var logPalette: ({
     text: String(foreground), dim: String(dim), error: String(urgent),
     warn: "#d9a13b", match: "rgba(217,161,59,0.45)", matchCurrent: "rgba(229,72,77,0.65)"
   })
 
-  function isResourceTab() {
-    return topMode === "workloads"
+  function toggleFull() {
+    closeAllPickers()
+    if (root.opened) { root.close(); backend.setPopupOpen(false) }
+    else {
+      if (root.quickOpened) root.quickOpened = false
+      backend.setPopupOpen(true)
+      root.open()
+      backend.refresh(false)
+      Qt.callLater(function() { if (keyCatcher) keyCatcher.forceActiveFocus() })
+    }
   }
 
-  function switchTab(tab) {
-    if (tab === "Events") {
-      topMode = "events"
-      backend.fetchEvents()
-    } else if (tab === "Logs") {
-      topMode = "logs"
-      ensureLogPod()
-    } else {
-      topMode = "workloads"
-      selectedResourceKind = String(tab || "all").toLowerCase()
+  function toggleQuick() {
+    closeAllPickers()
+    if (root.quickOpened) root.quickOpened = false
+    else {
+      if (root.opened) { root.close(); backend.setPopupOpen(false) }
+      root.quickIndex = 0
+      root.quickOpened = true
+      Qt.callLater(function() { if (quickKeys) quickKeys.forceActiveFocus() })
     }
+  }
+
+  function closeAll() {
+    closeAllPickers()
+    root.quickOpened = false
+    if (root.opened) { root.close(); backend.setPopupOpen(false) }
+  }
+
+  function switchTab(mode) {
+    closeAllPickers()
+    topMode = mode
+    if (topMode === "logs") ensureLogPod()
+    else if (topMode === "events") backend.fetchEvents()
+    else if (topMode === "workloads") backend.fetchWorkloads()
     backend.expandedKey = ""
-    pulseWlList()
   }
 
   function availableResourceKinds() {
@@ -87,7 +117,11 @@ Panel {
       { key: "services", label: "Services" },
       { key: "statefulsets", label: "StatefulSets" },
       { key: "daemonsets", label: "DaemonSets" },
-      { key: "jobs", label: "Jobs" }
+      { key: "jobs", label: "Jobs" },
+      { key: "ingresses", label: "Ingresses" },
+      { key: "configmaps", label: "ConfigMaps" },
+      { key: "secrets", label: "Secrets" },
+      { key: "pvc", label: "PVCs" }
     ]
     var out = []
     var seen = {}
@@ -95,7 +129,7 @@ Panel {
       var item = standard[i]
       var list = w[item.key]
       if (list instanceof Array && list.length > 0) {
-        out.push({ id: item.key, label: item.label, count: list.length })
+        out.push({ id: item.key, label: item.label, count: list.length, category: Model.resourceCategory(item.key) })
         seen[item.key] = true
       }
     }
@@ -103,8 +137,7 @@ Panel {
       if (k === "namespace" || seen[k]) continue
       var customList = w[k]
       if (customList instanceof Array && customList.length > 0) {
-        var cap = k.charAt(0).toUpperCase() + k.slice(1)
-        out.push({ id: k, label: cap, count: customList.length })
+        out.push({ id: k, label: Model.formatKindLabel(k), count: customList.length, category: "Custom" })
       }
     }
     return out
@@ -115,15 +148,6 @@ Panel {
     var sum = 0
     for (var i = 0; i < kinds.length; i++) sum += kinds[i].count
     return sum
-  }
-
-  // Gentle fade for user-initiated list changes only — background polls
-  // update the models silently, which is what killed the flashing.
-  function pulseWlList() {
-    if (!wlColumn) return
-    wlListFade.stop()
-    wlColumn.opacity = 0.35
-    wlListFade.restart()
   }
 
   function ensureLogPod() {
@@ -169,32 +193,16 @@ Panel {
     logFlick.contentY = Math.max(0, logFlick.contentHeight - logFlick.height)
   }
 
-  function rowActions(r) {
-    // Which mutating/navigating chips an expanded row offers.
-    if (!r || r.targetKind === "") return []
-    if (r.targetKind === "pod") return ["logs", "forward", "kill"]
-    if (r.targetKind === "service") return ["forward"]
-    return ["restart", "forward"]
-  }
-
-  function actionLabel(a) {
-    if (a === "logs") return "Logs"
-    if (a === "forward") return "Forward"
-    if (a === "kill") return "Kill pod"
-    if (a === "restart") return "Restart"
-    return a
-  }
-
   function runRowAction(r, a) {
     if (!r) return
     if (a === "logs") {
       backend.setLogPod(String(r.target))
-      root.topMode = "logs"
+      switchTab("logs")
       return
     }
     if (a === "forward") {
-      root.fwLocal = String(r.remoteHint || "")
-      root.fwRemote = String(r.remoteHint || "")
+      root.fwLocal = String(r.remoteHint || "8080")
+      root.fwRemote = String(r.remoteHint || "8080")
       root.forwardFormKey = String(r.key)
       return
     }
@@ -215,18 +223,6 @@ Panel {
     return what + " " + c.name + " in " + backend.activeNamespace + " on " + backend.activeContextName + "?"
   }
 
-  function wlItems(tab) {
-    var w = backend.workloads
-    if (!w) return []
-    if (tab === "Pods") return w.pods || []
-    if (tab === "Deploy") return w.deployments || []
-    if (tab === "STS") return w.statefulsets || []
-    if (tab === "DS") return w.daemonsets || []
-    if (tab === "Svc") return w.services || []
-    if (tab === "Jobs") return w.jobs || []
-    return []
-  }
-
   function sevOf(kind) {
     var k = String(kind || "")
     if (k === "crashloop" || k === "failed") return 0
@@ -238,12 +234,15 @@ Panel {
 
   function normRow(kind, it) {
     var kLower = String(kind || "").toLowerCase()
+    var nsPrefix = (backend.activeNamespace === "*" && it.namespace) ? (it.namespace + " · ") : ""
+
     if (kLower === "pods" || kLower === "pod") {
       return {
-        key: "pod/" + it.name, kind: it.kind, title: it.name,
+        key: "pod/" + (it.namespace ? it.namespace + "/" : "") + it.name, kind: it.kind, title: it.name,
+        namespace: it.namespace || "",
         typeLabel: "Pod",
         badge: it.display, badgeKind: it.kind,
-        meta: it.ready + "/" + it.readyTotal + " ready · " + it.restarts + " restarts · " + it.age + " · " + (it.node || "?"),
+        meta: nsPrefix + it.ready + "/" + it.readyTotal + " ready · " + it.restarts + "r · " + it.age + " · " + (it.node || it.podIP || ""),
         ageSeconds: it.ageSeconds || 0, sev: sevOf(it.kind),
         targetKind: "pod", target: it.name, remoteHint: 80,
         rawPod: it,
@@ -252,54 +251,108 @@ Panel {
     }
     if (kLower === "services" || kLower === "svc") {
       return {
-        key: "svc/" + it.name, kind: "running", title: it.name,
+        key: "svc/" + (it.namespace ? it.namespace + "/" : "") + it.name, kind: "running", title: it.name,
+        namespace: it.namespace || "",
         typeLabel: "Service",
         badge: it.type, badgeKind: "running",
-        meta: (it.clusterIP || "") + " · " + (it.ports || "") + " · " + it.age,
+        meta: nsPrefix + (it.clusterIP || "") + " · " + (it.ports || "") + " · " + it.age,
         ageSeconds: it.ageSeconds || 0, sev: 2,
         targetKind: "service", target: it.name, remoteHint: Model.firstPort(it.ports),
         rawItem: it,
-        lines: ["Type: " + it.type, "ClusterIP: " + (it.clusterIP || "—"), "Ports: " + (it.ports || "—"), "Age: " + it.age]
+        lines: ["Namespace: " + (it.namespace || "default"), "Type: " + it.type, "ClusterIP: " + (it.clusterIP || "—"), "Ports: " + (it.ports || "—"), "Age: " + it.age]
       }
     }
     if (kLower === "jobs" || kLower === "job") {
       var jk = it.statusKind || "waiting"
       return {
-        key: "job/" + it.name, kind: jk, title: it.name + (it.kind === "CronJob" ? "  ◷ " + (it.schedule || "") : ""),
+        key: "job/" + (it.namespace ? it.namespace + "/" : "") + it.name, kind: jk, title: it.name + (it.kind === "CronJob" ? "  ◷ " + (it.schedule || "") : ""),
+        namespace: it.namespace || "",
         typeLabel: it.kind || "Job",
         badge: it.display, badgeKind: jk,
-        meta: it.kind + " · A" + it.active + "/S" + it.succeeded + "/F" + it.failed + " · " + it.age,
+        meta: nsPrefix + it.kind + " · A" + it.active + "/S" + it.succeeded + "/F" + it.failed + " · " + it.age,
         ageSeconds: it.ageSeconds || 0, sev: sevOf(jk),
         targetKind: "", target: "", remoteHint: 0,
         rawItem: it,
         lines: [(it.schedule ? ("Schedule: " + it.schedule) : ""), "Active: " + it.active + " · Succeeded: " + it.succeeded + " · Failed: " + it.failed, "Age: " + it.age].filter(function(s){return s !== ""})
       }
     }
-    // Deploy / STS / DS scale rows
     var tk = kLower.indexOf("sts") >= 0 || kLower.indexOf("stateful") >= 0 ? "statefulset"
       : (kLower.indexOf("ds") >= 0 || kLower.indexOf("daemon") >= 0 ? "daemonset" : "deployment")
     var typeLabel = tk === "statefulset" ? "StatefulSet" : (tk === "daemonset" ? "DaemonSet" : "Deployment")
     if (kLower === "deployments" || kLower === "deploy" || kLower === "statefulsets" || kLower === "sts" || kLower === "daemonsets" || kLower === "ds") {
       return {
-        key: tk + "/" + it.name, kind: it.kind, title: it.name,
+        key: tk + "/" + (it.namespace ? it.namespace + "/" : "") + it.name, kind: it.kind, title: it.name,
+        namespace: it.namespace || "",
         typeLabel: typeLabel,
         badge: it.display, badgeKind: it.kind,
-        meta: it.ready + "/" + it.desired + " ready · upd " + it.updated + " · avail " + it.available + " · " + it.age,
+        meta: nsPrefix + it.ready + "/" + it.desired + " ready · upd " + it.updated + " · avail " + it.available + " · " + it.age,
         ageSeconds: it.ageSeconds || 0, sev: sevOf(it.kind),
         targetKind: tk, target: it.name, remoteHint: 80,
         rawItem: it,
         lines: ["Ready: " + it.ready + "/" + it.desired, "Updated: " + it.updated + " · Available: " + it.available, "Age: " + it.age]
       }
     }
-    // Generic / Custom Resource Definition (CRD) row!
+    if (kLower === "ingresses" || kLower === "ingress" || kLower === "ing") {
+      return {
+        key: "ing/" + (it.namespace ? it.namespace + "/" : "") + it.name, kind: "running", title: it.name,
+        namespace: it.namespace || "",
+        typeLabel: "Ingress",
+        badge: it.display || "Active", badgeKind: "running",
+        meta: nsPrefix + (it.hosts ? it.hosts + " · " : "") + (it.class ? "class: " + it.class + " · " : "") + it.age,
+        ageSeconds: it.ageSeconds || 0, sev: 2,
+        targetKind: "ingress", target: it.name, remoteHint: 80,
+        rawItem: it,
+        lines: ["Hosts: " + (it.hosts || "—"), "Class: " + (it.class || "—"), "Age: " + it.age]
+      }
+    }
+    if (kLower === "configmaps" || kLower === "cm") {
+      return {
+        key: "cm/" + (it.namespace ? it.namespace + "/" : "") + it.name, kind: "running", title: it.name,
+        namespace: it.namespace || "",
+        typeLabel: "ConfigMap",
+        badge: it.display || (it.dataCount + " keys"), badgeKind: "running",
+        meta: nsPrefix + (it.dataCount !== undefined ? it.dataCount + " keys · " : "") + it.age,
+        ageSeconds: it.ageSeconds || 0, sev: 2,
+        targetKind: "configmap", target: it.name, remoteHint: 0,
+        rawItem: it,
+        lines: ["Keys: " + (it.dataCount || 0), "Age: " + it.age]
+      }
+    }
+    if (kLower === "secrets") {
+      return {
+        key: "secret/" + (it.namespace ? it.namespace + "/" : "") + it.name, kind: "running", title: it.name,
+        namespace: it.namespace || "",
+        typeLabel: "Secret",
+        badge: it.type || "Secret", badgeKind: "running",
+        meta: nsPrefix + (it.type ? it.type + " · " : "") + (it.dataCount !== undefined ? it.dataCount + " keys · " : "") + it.age,
+        ageSeconds: it.ageSeconds || 0, sev: 2,
+        targetKind: "secret", target: it.name, remoteHint: 0,
+        rawItem: it,
+        lines: ["Type: " + (it.type || "Opaque"), "Keys: " + (it.dataCount || 0), "Age: " + it.age]
+      }
+    }
+    if (kLower === "pvc" || kLower === "persistentvolumeclaims") {
+      return {
+        key: "pvc/" + (it.namespace ? it.namespace + "/" : "") + it.name, kind: it.kind || "running", title: it.name,
+        namespace: it.namespace || "",
+        typeLabel: "PVC",
+        badge: it.display || it.status || "Bound", badgeKind: it.kind || "running",
+        meta: nsPrefix + (it.status ? it.status + " · " : "") + (it.capacity ? it.capacity + " · " : "") + (it.class ? it.class + " · " : "") + it.age,
+        ageSeconds: it.ageSeconds || 0, sev: sevOf(it.kind),
+        targetKind: "pvc", target: it.name, remoteHint: 0,
+        rawItem: it,
+        lines: ["Status: " + (it.status || "—"), "Capacity: " + (it.capacity || "—"), "StorageClass: " + (it.class || "—"), "Age: " + it.age]
+      }
+    }
     return {
-      key: kind + "/" + (it.name || "item"),
+      key: kind + "/" + (it.namespace ? it.namespace + "/" : "") + (it.name || "item"),
       kind: it.kind || "running",
       title: it.name || "item",
-      typeLabel: it.type || kind,
+      namespace: it.namespace || "",
+      typeLabel: it.type || Model.formatKindLabel(kind),
       badge: it.display || it.kind || it.status || "Ready",
       badgeKind: it.kind || "running",
-      meta: (it.meta || it.age || it.namespace || ""),
+      meta: nsPrefix + (it.meta ? it.meta + " · " : "") + (it.age || ""),
       ageSeconds: it.ageSeconds || 0,
       sev: sevOf(it.kind),
       targetKind: kind,
@@ -310,53 +363,60 @@ Panel {
     }
   }
 
+  function podLines(p) {
+    if (!p) return []
+    var l = []
+    if (p.namespace) l.push("Namespace: " + p.namespace)
+    l.push("Phase: " + p.phase + " (" + p.display + ")")
+    l.push("Ready: " + p.ready + "/" + p.readyTotal + " · Restarts: " + p.restarts)
+    if (p.node) l.push("Node: " + p.node)
+    if (p.podIP) l.push("IP: " + p.podIP)
+    l.push("Age: " + p.age)
+    return l
+  }
+
   function genericLines(it) {
     var out = []
+    if (it.namespace) out.push("Namespace: " + it.namespace)
     if (it.age) out.push("Age: " + it.age)
     for (var k in it) {
-      if (k === "name" || k === "kind" || k === "display" || k === "age" || k === "ageSeconds") continue
+      if (k === "name" || k === "kind" || k === "display" || k === "age" || k === "ageSeconds" || k === "namespace") continue
       var val = it[k]
       if (typeof val === "string" || typeof val === "number" || typeof val === "boolean") {
-        out.push(k + ": " + val)
+        out.push(k.charAt(0).toUpperCase() + k.slice(1) + ": " + val)
       }
     }
     return out
   }
 
-  function podLines(p) {
-    var out = ["Node " + (p.node || "?") + " · IP " + (p.podIP || "—") + " · Age " + p.age]
-    var cs = p.containers || []
-    for (var i = 0; i < cs.length; i++) {
-      var c = cs[i]
-      var img = String(c.image || "")
-      var short = img.indexOf("/") >= 0 ? img.slice(img.lastIndexOf("/") + 1) : img
-      out.push((c.ready ? "● " : "○ ") + c.name + " (" + short + ") · " + c.state + (c.restarts > 0 ? " · " + c.restarts + " restarts" : ""))
-    }
-    var conds = p.conditions || []
-    var bits = []
-    for (var j = 0; j < conds.length; j++) {
-      var cnd = conds[j]
-      if (cnd.status === "True") bits.push("✔ " + cnd.type)
-      else bits.push("✕ " + cnd.type)
-    }
-    if (bits.length > 0) out.push(bits.join("  "))
-    return out
-  }
-
   function filteredWorkloads() {
-    if (topMode !== "workloads") return []
     var w = backend.workloads
     if (!w) return []
     var kinds = availableResourceKinds()
     var rows = []
-    var q = searchField.text.trim().toLowerCase()
+    var q = omniSearch.text.trim().toLowerCase()
+    var nsFilter = ""
+    var kindFilter = ""
+
+    if (q.indexOf("@") === 0) {
+      var parts = q.slice(1).split(" ")
+      nsFilter = parts[0]
+      q = parts.slice(1).join(" ").trim()
+    } else if (q.indexOf(":") === 0) {
+      var kparts = q.slice(1).split(" ")
+      kindFilter = kparts[0]
+      q = kparts.slice(1).join(" ").trim()
+    }
 
     for (var i = 0; i < kinds.length; i++) {
       var kid = kinds[i].id
       if (selectedResourceKind !== "all" && selectedResourceKind !== kid) continue
+      if (kindFilter !== "" && kid.toLowerCase().indexOf(kindFilter) < 0) continue
       var list = w[kid] || []
       for (var j = 0; j < list.length; j++) {
-        var r = normRow(kid, list[j])
+        var it = list[j]
+        if (nsFilter !== "" && it.namespace && it.namespace.toLowerCase().indexOf(nsFilter) < 0) continue
+        var r = normRow(kid, it)
         if (q !== "") {
           var match = r.title.toLowerCase().indexOf(q) >= 0 ||
                       r.badge.toLowerCase().indexOf(q) >= 0 ||
@@ -383,64 +443,19 @@ Panel {
   }
 
   function filteredEvents() {
-    var q = searchField.text.trim().toLowerCase()
-    var out = []
+    var q = omniSearch.text.trim().toLowerCase()
     var evs = backend.events || []
+    var out = []
     for (var i = 0; i < evs.length; i++) {
       var e = evs[i]
+      if (eventsOnlyWarnings && String(e.type) !== "Warning") continue
       if (q !== "") {
-        var hay = (String(e.reason || "") + " " + String(e.object || "") + " " + String(e.message || "")).toLowerCase()
-        if (hay.indexOf(q) === -1) continue
+        var str = (e.reason + " " + e.object + " " + e.message + " " + (e.namespace || "")).toLowerCase()
+        if (str.indexOf(q) < 0) continue
       }
       out.push(e)
     }
     return out
-  }
-
-  function toggleFull() {
-    quickOpened = false
-    root.toggle()
-  }
-
-  function toggleQuick() {
-    if (root.opened) root.close()
-    quickOpened = !quickOpened
-    backend.setPopupOpen(root.opened || quickOpened)
-    if (quickOpened) Qt.callLater(function() { if (quickKeys) quickKeys.forceActiveFocus() })
-  }
-
-  function closeAll() {
-    quickOpened = false
-    backend.setPopupOpen(false)
-    root.close()
-  }
-
-  // Merge a patch into this widget's shell.json entry (persists
-  // lastContext + per-context accents across restarts). Same mechanism
-  // native panels use; values flow back in as root.settings.
-  function persistSettings(patch) {
-    if (!root.bar || !root.bar.shell || typeof root.bar.shell.updateEntryInline !== "function") return
-    var entry = { id: root.moduleName }
-    for (var key in root.settings) if (key !== "id") entry[key] = root.settings[key]
-    for (var p in patch) entry[p] = patch[p]
-    root.bar.shell.updateEntryInline(root.moduleName, entry)
-  }
-
-  implicitWidth: pill.implicitWidth
-  implicitHeight: pill.implicitHeight
-
-  onOpenedChanged: {
-    backend.setPopupOpen(opened || quickOpened)
-    if (opened) {
-      quickOpened = false
-      backend.refresh(false)
-      Qt.callLater(function() { if (keyCatcher) keyCatcher.forceActiveFocus() })
-      // Springy entrance for the content (the card itself already fades
-      // natively in 140ms OutCubic — this scale runs on top, never blocks).
-      popupContent.scale = 0.96
-      popupContent.opacity = 0.0
-      entrance.restart()
-    }
   }
 
   Service {
@@ -455,7 +470,6 @@ Panel {
         Qt.callLater(function() { root.scrollLogToBottom() })
       }
     }
-    function onActiveNamespaceChanged() { root.pulseWlList() }
     function onWorkloadsFreshChanged() {
       if (backend.workloadsFresh && root.topMode === "logs" && backend.logPod === "") {
         root.ensureLogPod()
@@ -463,16 +477,6 @@ Panel {
     }
   }
 
-  NumberAnimation {
-    id: wlListFade
-    target: wlColumn
-    property: "opacity"
-    to: 1.0
-    duration: 160
-    easing.type: Easing.OutCubic
-  }
-
-  // Log follow polling: tail refreshes while the Logs tab is open.
   Timer {
     interval: 5000
     running: root.opened && root.topMode === "logs" && backend.logFollow && !backend.logsLoading && backend.logPod !== ""
@@ -500,13 +504,11 @@ Panel {
     function refresh(): string { backend.refresh(); return "ok" }
     function status(): string { return String(backend.healthStatus) }
     function expand(key: string): void { backend.expandedKey = key }
-    function setMode(mode: string): void { root.topMode = mode }
-    function setLogPod(pod: string): void { backend.setLogPod(pod); root.topMode = "logs" }
+    function setMode(mode: string): void { root.switchTab(mode) }
+    function setLogPod(pod: string): void { backend.setLogPod(pod); root.switchTab("logs") }
   }
 
-  // ---- bar pill: k8s mark + health dot + short label, sized to content ----
-  // The button's width tracks the row (capped) so long context names can
-  // never paint over neighboring widgets; the label itself elides.
+  // ---- Bar pill ----
   WidgetButton {
     id: pill
     anchors.fill: parent
@@ -514,7 +516,7 @@ Panel {
     labelVisible: false
     hasVisualContent: true
     implicitWidth: Math.min(pillRow.implicitWidth + scaledHorizontalMargin * 2, Style.space(168))
-    tooltipText: (backend.activeContextName || "kubernetes") + " · " + backend.healthStatus
+    tooltipText: (backend.activeContextName || "kubernetes") + " · " + (backend.activeNamespace === "*" ? "all namespaces" : backend.activeNamespace) + " · " + backend.healthStatus
 
     Row {
       id: pillRow
@@ -528,15 +530,6 @@ Panel {
         radius: width / 2
         anchors.verticalCenter: parent.verticalCenter
         color: root.healthDot
-        border.width: 1
-        border.color: Qt.rgba(0, 0, 0, 0.35)
-        // Idle pulse ONLY when degraded — healthy stays calm/static.
-        SequentialAnimation on opacity {
-          running: backend.healthStatus === "degraded" || backend.healthStatus === "down"
-          loops: Animation.Infinite
-          NumberAnimation { to: 0.45; duration: 700; easing.type: Easing.InOutQuad }
-          NumberAnimation { to: 1.0; duration: 700; easing.type: Easing.InOutQuad }
-        }
       }
 
       OmakubeIcon {
@@ -567,7 +560,7 @@ Panel {
     }
   }
 
-  // ---- the product: full popup anchored under the pill ----
+  // ---- Main popup ----
   KeyboardPanel {
     id: panel
     anchorItem: pill
@@ -576,466 +569,557 @@ Panel {
     open: root.opened
     focusTarget: keyCatcher
     contentWidth: Math.min(Style.space(520), panel.fittedContentWidth(Style.space(520)))
-    contentHeight: panel.fittedContentHeight(column.implicitHeight + Style.space(20), Style.space(640))
+    contentHeight: Style.space(640)
 
     PanelKeyCatcher {
       id: keyCatcher
       anchors.fill: parent
       blocked: root.confirmState !== null
-      onCloseRequested: root.closeAll()
+      onCloseRequested: {
+        if (root.contextPickerOpen || root.nsPickerOpen || root.kindPickerOpen || root.logPodPickerOpen) {
+          root.closeAllPickers()
+        } else {
+          root.closeAll()
+        }
+      }
       onTabRequested: function(direction) { root.switchPanel(direction) }
       onTextKey: function(t) {
-        if (t === "/") searchField.forceActiveFocus()
+        if (t === "/") { omniSearch.forceActiveFocus(); omniSearch.selectAll() }
         else if (t === "r" || t === "R") backend.refresh(true)
       }
 
-      Flickable {
+      // Root layout container: zero wasted space, vertically stacked
+      ColumnLayout {
         anchors.fill: parent
-        contentWidth: width
-        contentHeight: column.implicitHeight + Style.space(20)
-        clip: true
-        boundsBehavior: Flickable.StopAtBounds
-        flickableDirection: Flickable.VerticalFlick
-        interactive: contentHeight > height
-        ScrollBar.vertical: ScrollBar { policy: ScrollBar.AsNeeded }
+        spacing: 0
 
-        // Entrance wrapper: springy scale+fade, never blocks clicks.
-        Item {
-          id: popupContent
-          width: column.width
-          height: column.height
+        // =================================================================
+        // ZONE A: SMART BREADCRUMB BAR (34px)
+        // [☸ Context ▾] / [⎈ Namespace ▾] / [⚡ Kind (Count) ▾]  [● 45ms]
+        // =================================================================
+        BorderSurface {
+          Layout.fillWidth: true
+          implicitHeight: Style.space(34)
+          color: Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, 0.04)
+          borderSpec: Border.controlSpec("normal", root.dim, root.accent)
 
-          SequentialAnimation {
-            id: entrance
-            ParallelAnimation {
-              NumberAnimation { target: popupContent; property: "scale"; from: 0.96; to: 1.0; duration: 180; easing.type: Easing.OutBack }
-              NumberAnimation { target: popupContent; property: "opacity"; from: 0.0; to: 1.0; duration: 140; easing.type: Easing.OutCubic }
-            }
-          }
-          transformOrigin: Item.Top
+          RowLayout {
+            anchors.fill: parent
+            anchors.leftMargin: Style.space(8)
+            anchors.rightMargin: Style.space(8)
+            spacing: Style.space(6)
 
-          Column {
-            id: column
-            width: panel.contentWidth - Style.spacing.popupPadding * 2 - Style.space(4)
-            spacing: Style.space(12)
-
-            // ---- context hero: quiet mark + status, no glow, no ring ----
-            PanelHero {
-              id: hero
-              width: parent.width
-              title: backend.activeContextName || "no context"
-              meta: (backend.activeNamespace || "default").toUpperCase() + " · " + String(backend.healthStatus).toUpperCase()
-              detail: backend.heroDetail()
+            // 1. Context Selector Button
+            CursorSurface {
+              implicitHeight: Style.space(26)
+              implicitWidth: ctxRowBox.implicitWidth + Style.space(12)
+              current: root.contextPickerOpen
               foreground: root.foreground
-              fontFamily: root.fontFamily
-              iconComponent: Component {
-                Item {
-                  width: Style.space(30)
-                  height: Style.space(30)
-                  // Calm refresh indicator: one slow revolution (~2.6s),
-                  // eased back to rest instead of snapping.
-                  Item {
-                    id: heroSpin
-                    anchors.centerIn: parent
-                    width: Style.space(24)
-                    height: Style.space(24)
-                    property bool spinning: backend.refreshing
-                    onSpinningChanged: {
-                      if (spinning) { rotation = 0; spinLoop.restart() }
-                      else { spinLoop.stop(); spinFinish.from = rotation; spinFinish.restart() }
-                    }
-                    NumberAnimation {
-                      id: spinLoop
-                      target: heroSpin
-                      property: "rotation"
-                      from: 0
-                      to: 360
-                      duration: 2600
-                      loops: Animation.Infinite
-                    }
-                    NumberAnimation {
-                      id: spinFinish
-                      target: heroSpin
-                      property: "rotation"
-                      to: 360
-                      duration: 300
-                      easing.type: Easing.OutCubic
-                      onFinished: heroSpin.rotation = 0
-                    }
-                    OmakubeIcon {
-                      anchors.fill: parent
-                      iconSize: Style.space(24)
-                      color: root.foreground
-                      opacityLevel: 0.95
-                    }
-                  }
-                  Rectangle {
-                    anchors.right: parent.right
-                    anchors.bottom: parent.bottom
-                    width: Style.space(10)
-                    height: Style.space(10)
-                    radius: width / 2
-                    color: root.healthDot
-                    border.width: 2
-                    border.color: Color.background
-                  }
+
+              RowLayout {
+                id: ctxRowBox
+                anchors.centerIn: parent
+                spacing: Style.space(4)
+
+                Rectangle {
+                  width: Style.space(8); height: Style.space(8); radius: width / 2
+                  color: root.healthDot
+                }
+
+                Text {
+                  text: Model.shortLabel(backend.activeContextName || "k8s")
+                  color: root.foreground
+                  font.family: root.fontFamily
+                  font.pixelSize: Style.font.bodySmall
+                  font.bold: true
+                }
+
+                Text {
+                  text: "▾"
+                  color: root.dim
+                  font.pixelSize: Style.font.caption
+                }
+              }
+
+              MouseArea {
+                anchors.fill: parent
+                hoverEnabled: true
+                cursorShape: Qt.PointingHandCursor
+                onClicked: {
+                  var next = !root.contextPickerOpen
+                  root.closeAllPickers()
+                  root.contextPickerOpen = next
                 }
               }
             }
 
             Text {
-              visible: backend.actionStatus !== "" || backend.lastError !== ""
-              width: parent.width
-              textFormat: Text.PlainText
-              text: backend.actionStatus !== "" ? backend.actionStatus : Model.humanError(backend.lastError)
-              color: backend.lastError !== "" && backend.actionStatus === "" ? root.urgent : root.dim
+              text: "/"
+              color: root.dim
               font.family: root.fontFamily
               font.pixelSize: Style.font.bodySmall
-              wrapMode: Text.WordWrap
             }
 
-            // ---- search (instant, reachable via /) ----
-            TextField {
-              id: searchField
-              width: parent.width
+            // 2. Namespace Selector Button
+            CursorSurface {
+              implicitHeight: Style.space(26)
+              implicitWidth: nsRowBox.implicitWidth + Style.space(12)
+              current: root.nsPickerOpen
               foreground: root.foreground
-              placeholderText: "Filter workloads…  ( / )"
-              Keys.onPressed: function(event) {
-                if (event.key === Qt.Key_Escape) { clear(); keyCatcher.forceActiveFocus(); event.accepted = true }
-              }
-            }
-
-            // ---- namespace switcher ----
-            Column {
-              visible: backend.namespaces.length > 0
-              width: parent.width
-              spacing: Style.space(6)
-
-              SectionToggle {
-                title: "NAMESPACES"
-                badge: backend.activeNamespace
-                open: root.namespacesOpen
-                onToggled: root.namespacesOpen = !root.namespacesOpen
-              }
-
-              Flickable {
-                visible: root.namespacesOpen
-                width: parent.width
-                height: nsRow.height
-                contentWidth: nsRow.width
-                clip: true
-                boundsBehavior: Flickable.StopAtBounds
-                flickableDirection: Flickable.HorizontalFlick
-                interactive: contentWidth > width
-                Row {
-                  id: nsRow
-                  spacing: Style.space(6)
-                  Repeater {
-                    model: backend.namespaces
-                    NsChip {
-                      required property var modelData
-                      width: implicitWidth
-                      ns: modelData
-                    }
-                  }
-                }
-              }
-            }
-
-            // ---- top mode bar: Workloads | Events | Logs ----
-            RowLayout {
-              width: parent.width
-              spacing: Style.space(6)
-
-              Button {
-                Layout.fillWidth: true
-                text: "Workloads (" + root.totalWorkloadCount() + ")"
-                fontSize: Style.font.bodySmall
-                selected: root.topMode === "workloads"
-                bordered: true
-                onClicked: root.topMode = "workloads"
-              }
-
-              Button {
-                Layout.fillWidth: true
-                text: "Events (" + (backend.events ? backend.events.length : 0) + ")"
-                fontSize: Style.font.bodySmall
-                selected: root.topMode === "events"
-                bordered: true
-                onClicked: {
-                  root.topMode = "events"
-                  backend.fetchEvents()
-                }
-              }
-
-              Button {
-                Layout.fillWidth: true
-                text: "Logs"
-                fontSize: Style.font.bodySmall
-                selected: root.topMode === "logs"
-                bordered: true
-                onClicked: {
-                  root.topMode = "logs"
-                  root.ensureLogPod()
-                }
-              }
-            }
-
-            // ---- workloads skeleton ----
-            Column {
-              visible: root.topMode === "workloads" && backend.workloadsLoading && !backend.workloadsFresh
-              width: parent.width
-              spacing: Style.space(6)
-              Repeater {
-                model: 3
-                Rectangle {
-                  width: parent.width
-                  height: Style.space(34)
-                  radius: Style.cornerRadius
-                  color: root.dim
-                  opacity: 0.25
-                  SequentialAnimation on opacity {
-                    running: visible
-                    loops: Animation.Infinite
-                    NumberAnimation { to: 0.12; duration: 600; easing.type: Easing.InOutQuad }
-                    NumberAnimation { to: 0.25; duration: 600; easing.type: Easing.InOutQuad }
-                  }
-                }
-              }
-            }
-
-            // ---- workloads: kind filters + list ----
-            Column {
-              visible: root.topMode === "workloads" && backend.workloadsFresh && backend.workloadsError === ""
-              width: parent.width
-              spacing: Style.space(8)
-
-              // Dynamic Resource Kinds filter bar (Pods, Deployments, Services, CRDs, etc.)
-              Flickable {
-                id: kindFlick
-                width: parent.width
-                height: kindRow.height
-                contentWidth: kindRow.width
-                clip: true
-                boundsBehavior: Flickable.StopAtBounds
-                flickableDirection: Flickable.HorizontalFlick
-                interactive: contentWidth > width
-
-                Row {
-                  id: kindRow
-                  spacing: Style.space(6)
-
-                  Chip {
-                    label: "All (" + root.totalWorkloadCount() + ")"
-                    active: root.selectedResourceKind === "all"
-                    onClicked: root.selectedResourceKind = "all"
-                  }
-
-                  Repeater {
-                    model: root.availableResourceKinds()
-                    Chip {
-                      required property var modelData
-                      label: modelData.label + " (" + modelData.count + ")"
-                      active: root.selectedResourceKind === modelData.id
-                      onClicked: root.selectedResourceKind = modelData.id
-                    }
-                  }
-                }
-              }
 
               RowLayout {
-                width: parent.width
-                Text {
-                  textFormat: Text.PlainText
-                  text: (root.selectedResourceKind === "all" ? "All workloads" : root.selectedResourceKind.toUpperCase()) + " in " + backend.activeNamespace
-                  color: root.dim
-                  font.family: root.fontFamily
-                  font.pixelSize: Style.font.caption
-                }
-                Item { Layout.fillWidth: true; height: 1 }
-                Text {
-                  textFormat: Text.PlainText
-                  text: "Sort: " + root.sortMode + " ▾"
-                  color: root.dim
-                  font.family: root.fontFamily
-                  font.pixelSize: Style.font.caption
-                  MouseArea {
-                    anchors.fill: parent
-                    hoverEnabled: true
-                    cursorShape: Qt.PointingHandCursor
-                    onClicked: root.cycleSort()
-                  }
-                }
-              }
-
-              Column {
-                id: wlColumn
-                width: parent.width
-                spacing: Style.space(6)
-                Repeater {
-                  model: root.filteredWorkloads()
-                  WorkloadRow {
-                    required property var modelData
-                    required property int index
-                    width: wlColumn.width
-                    row: modelData
-                    rowIndex: index
-                  }
-                }
-              }
-
-              // Empty state
-              Column {
-                visible: root.filteredWorkloads().length === 0
-                width: parent.width
+                id: nsRowBox
+                anchors.centerIn: parent
                 spacing: Style.space(4)
+
                 Text {
-                  width: parent.width
-                  horizontalAlignment: Text.AlignHCenter
-                  text: "○"
-                  color: root.dim
-                  font.pixelSize: Style.font.display
+                  text: backend.activeNamespace === "*" ? "all namespaces" : backend.activeNamespace
+                  color: backend.activeNamespace === "*" ? root.accent : root.foreground
+                  font.family: root.fontFamily
+                  font.pixelSize: Style.font.bodySmall
+                  font.bold: true
+                  elide: Text.ElideRight
                 }
+
                 Text {
-                  width: parent.width
-                  horizontalAlignment: Text.AlignHCenter
-                  textFormat: Text.PlainText
-                  text: searchField.text.trim() !== "" ? "No match for “" + searchField.text.trim() + "”" : "No resources found in " + backend.activeNamespace
+                  text: "▾"
+                  color: root.dim
+                  font.pixelSize: Style.font.caption
+                }
+              }
+
+              MouseArea {
+                anchors.fill: parent
+                hoverEnabled: true
+                cursorShape: Qt.PointingHandCursor
+                onClicked: {
+                  var next = !root.nsPickerOpen
+                  root.closeAllPickers()
+                  root.nsPickerOpen = next
+                  if (next) Qt.callLater(function() { nsSearchInput.forceActiveFocus() })
+                }
+              }
+            }
+
+            Text {
+              text: "/"
+              color: root.dim
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.bodySmall
+            }
+
+            // 3. Resource Kind Selector Button
+            CursorSurface {
+              implicitHeight: Style.space(26)
+              implicitWidth: kindRowBox.implicitWidth + Style.space(12)
+              current: root.kindPickerOpen
+              foreground: root.foreground
+
+              RowLayout {
+                id: kindRowBox
+                anchors.centerIn: parent
+                spacing: Style.space(4)
+
+                Text {
+                  text: (root.selectedResourceKind === "all" ? "All" : Model.formatKindLabel(root.selectedResourceKind)) + " (" + root.totalWorkloadCount() + ")"
                   color: root.foreground
                   font.family: root.fontFamily
-                  font.pixelSize: Style.font.body
+                  font.pixelSize: Style.font.bodySmall
                   font.bold: true
                 }
+
                 Text {
-                  width: parent.width
-                  horizontalAlignment: Text.AlignHCenter
-                  textFormat: Text.PlainText
-                  text: (root.selectedResourceKind === "all" ? "All types" : root.selectedResourceKind) + " · " + backend.activeNamespace
+                  text: "▾"
                   color: root.dim
-                  font.family: root.fontFamily
                   font.pixelSize: Style.font.caption
+                }
+              }
+
+              MouseArea {
+                anchors.fill: parent
+                hoverEnabled: true
+                cursorShape: Qt.PointingHandCursor
+                onClicked: {
+                  var next = !root.kindPickerOpen
+                  root.closeAllPickers()
+                  root.kindPickerOpen = next
                 }
               }
             }
 
-            // ---- events view ----
-            Column {
-              visible: root.topMode === "events"
-              width: parent.width
+            Item { Layout.fillWidth: true }
+
+            // 4. Latency & Refresh Indicator
+            RowLayout {
               spacing: Style.space(6)
 
-              RowLayout {
-                width: parent.width
-                Text {
-                  textFormat: Text.PlainText
-                  text: "Events in " + backend.activeNamespace
-                  color: root.dim
-                  font.family: root.fontFamily
-                  font.pixelSize: Style.font.caption
+              Text {
+                visible: backend.apiLatencyMs >= 0
+                text: backend.apiLatencyMs + "ms"
+                color: root.dim
+                font.family: "monospace"
+                font.pixelSize: Style.font.caption
+              }
+
+              CursorSurface {
+                implicitWidth: Style.space(24)
+                implicitHeight: Style.space(24)
+                foreground: root.foreground
+
+                Item {
+                  id: spinMark
+                  anchors.centerIn: parent
+                  width: Style.space(18); height: Style.space(18)
+                  property bool spinning: backend.refreshing
+                  onSpinningChanged: {
+                    if (spinning) { rotation = 0; spinAnim.restart() }
+                    else { spinAnim.stop(); rotation = 0 }
+                  }
+                  NumberAnimation {
+                    id: spinAnim
+                    target: spinMark
+                    property: "rotation"
+                    from: 0; to: 360; duration: 1800
+                    loops: Animation.Infinite
+                  }
+                  OmakubeIcon {
+                    anchors.fill: parent
+                    iconSize: Style.space(18)
+                    color: root.foreground
+                    opacityLevel: backend.refreshing ? 1.0 : 0.75
+                  }
                 }
-                Item { Layout.fillWidth: true; height: 1 }
+
+                MouseArea {
+                  anchors.fill: parent
+                  hoverEnabled: true
+                  cursorShape: Qt.PointingHandCursor
+                  onClicked: backend.refresh(true)
+                }
+              }
+            }
+          }
+        }
+
+        // =================================================================
+        // ZONE B: UNIFIED OMNIBAR & STATUS STRIP (32px)
+        // [ Filter ( / to focus, @ns, :kind ) ]  [Sort: Status ▾] [Density]
+        // =================================================================
+        Item {
+          Layout.fillWidth: true
+          implicitHeight: Style.space(32)
+
+          RowLayout {
+            anchors.fill: parent
+            anchors.leftMargin: Style.space(8)
+            anchors.rightMargin: Style.space(8)
+            spacing: Style.space(6)
+
+            TextField {
+              id: omniSearch
+              Layout.fillWidth: true
+              foreground: root.foreground
+              placeholderText: root.topMode === "logs" ? "Search log stream… (/)" : "Filter ( / to focus, @ns, :kind )"
+              text: root.topMode === "logs" ? root.logSearch : ""
+              onTextChanged: {
+                if (root.topMode === "logs") {
+                  root.logSearch = text
+                  root.currentMatchLine = -1
+                  var m = root.logMatchLines()
+                  if (m.length > 0) {
+                    root.currentMatchLine = m[0]
+                    root.scrollLogTo(m[0])
+                  }
+                }
+              }
+              Keys.onPressed: function(event) {
+                if (event.key === Qt.Key_Escape) {
+                  clear()
+                  keyCatcher.forceActiveFocus()
+                  event.accepted = true
+                } else if (root.topMode === "logs" && (event.key === Qt.Key_Return || event.key === Qt.Key_Enter)) {
+                  root.stepMatch(1)
+                  event.accepted = true
+                }
+              }
+            }
+
+            // Match count indicator for logs
+            Text {
+              visible: root.topMode === "logs" && root.logSearch.trim() !== ""
+              textFormat: Text.PlainText
+              text: {
+                var m = root.logMatchLines()
+                if (m.length === 0) return "0/0"
+                var pos = m.indexOf(root.currentMatchLine) + 1
+                return (pos <= 0 ? "–" : pos) + "/" + m.length
+              }
+              color: root.dim
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.caption
+            }
+
+            // Log navigation step buttons
+            Button {
+              visible: root.topMode === "logs" && root.logSearch.trim() !== ""
+              text: "‹"
+              fontSize: Style.font.caption
+              horizontalPadding: Style.space(6); verticalPadding: Style.space(2)
+              bordered: true
+              onClicked: root.stepMatch(-1)
+            }
+            Button {
+              visible: root.topMode === "logs" && root.logSearch.trim() !== ""
+              text: "›"
+              fontSize: Style.font.caption
+              horizontalPadding: Style.space(6); verticalPadding: Style.space(2)
+              bordered: true
+              onClicked: root.stepMatch(1)
+            }
+
+            // Sort Cycler button
+            Button {
+              visible: root.topMode === "workloads"
+              text: root.sortMode
+              fontSize: Style.font.caption
+              horizontalPadding: Style.space(8); verticalPadding: Style.space(2)
+              bordered: true
+              onClicked: root.cycleSort()
+            }
+
+            // Density Mode Toggle Button
+            Button {
+              visible: root.topMode === "workloads"
+              text: root.compactMode ? "Compact" : "Comfort"
+              fontSize: Style.font.caption
+              horizontalPadding: Style.space(8); verticalPadding: Style.space(2)
+              bordered: true
+              onClicked: root.compactMode = !root.compactMode
+            }
+          }
+        }
+
+        // Action Status / Error Strip (compact toast)
+        BorderSurface {
+          visible: backend.actionStatus !== "" || backend.lastError !== ""
+          Layout.fillWidth: true
+          implicitHeight: Style.space(24)
+          color: backend.lastError !== "" && backend.actionStatus === "" ? Qt.rgba(root.urgent.r, root.urgent.g, root.urgent.b, 0.12) : Qt.rgba(root.accent.r, root.accent.g, root.accent.b, 0.12)
+          borderSpec: Border.controlSpec("normal", backend.lastError !== "" ? root.urgent : root.accent, root.accent)
+
+          RowLayout {
+            anchors.fill: parent
+            anchors.leftMargin: Style.space(8); anchors.rightMargin: Style.space(8)
+            Text {
+              Layout.fillWidth: true
+              textFormat: Text.PlainText
+              text: backend.actionStatus !== "" ? backend.actionStatus : Model.humanError(backend.lastError)
+              color: backend.lastError !== "" && backend.actionStatus === "" ? root.urgent : root.foreground
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.caption
+              font.bold: true
+              elide: Text.ElideRight
+            }
+          }
+        }
+
+        // =================================================================
+        // ZONE C: DYNAMIC CONTENT CANVAS (Fills remaining ~538px)
+        // =================================================================
+        Item {
+          Layout.fillWidth: true
+          Layout.fillHeight: true
+          clip: true
+
+          // --- VIEW 1: WORKLOADS (Virtualized ListView) ---
+          Item {
+            anchors.fill: parent
+            visible: root.topMode === "workloads"
+
+            ListView {
+              id: wlList
+              anchors.fill: parent
+              anchors.margins: Style.space(4)
+              clip: true
+              boundsBehavior: Flickable.StopAtBounds
+              model: root.filteredWorkloads()
+              spacing: Style.space(4)
+              ScrollBar.vertical: ScrollBar { policy: ScrollBar.AsNeeded }
+
+              delegate: WorkloadRow {
+                required property var modelData
+                required property int index
+                width: wlList.width - (wlList.ScrollBar.vertical && wlList.ScrollBar.vertical.visible ? Style.space(8) : 0)
+                row: modelData
+                rowIndex: index
+                isCompact: root.compactMode
+              }
+            }
+
+            // Workloads Loading Skeleton
+            Column {
+              anchors.fill: parent
+              anchors.margins: Style.space(8)
+              spacing: Style.space(4)
+              visible: backend.workloadsLoading && !backend.workloadsFresh
+              Repeater {
+                model: 8
+                Rectangle {
+                  width: parent.width; height: Style.space(28); radius: Style.cornerRadius
+                  color: root.dim; opacity: 0.18
+                }
+              }
+            }
+
+            // Empty state
+            Column {
+              anchors.centerIn: parent
+              spacing: Style.space(4)
+              visible: backend.workloadsFresh && root.filteredWorkloads().length === 0
+              Text {
+                anchors.horizontalCenter: parent.horizontalCenter
+                text: "○"
+                color: root.dim
+                font.pixelSize: Style.font.display
+              }
+              Text {
+                anchors.horizontalCenter: parent.horizontalCenter
+                textFormat: Text.PlainText
+                text: omniSearch.text.trim() !== "" ? ("No match for “" + omniSearch.text.trim() + "”") : "No workloads found"
+                color: root.foreground
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.bodySmall
+                font.bold: true
+              }
+            }
+          }
+
+          // --- VIEW 2: EVENTS (Virtualized ListView) ---
+          Item {
+            anchors.fill: parent
+            visible: root.topMode === "events"
+
+            ColumnLayout {
+              anchors.fill: parent
+              spacing: Style.space(4)
+
+              // Events top strip: Warning toggle + refresh
+              RowLayout {
+                Layout.fillWidth: true
+                Layout.margins: Style.space(6)
+                spacing: Style.space(6)
+
+                Button {
+                  text: root.eventsOnlyWarnings ? "Warnings Only: ON" : "Show All Events"
+                  selected: root.eventsOnlyWarnings
+                  bordered: true
+                  fontSize: Style.font.caption
+                  onClicked: root.eventsOnlyWarnings = !root.eventsOnlyWarnings
+                }
+
+                Item { Layout.fillWidth: true }
+
                 Button {
                   text: "Refresh"
                   fontSize: Style.font.caption
-                  horizontalPadding: Style.space(8)
-                  verticalPadding: Style.space(2)
                   bordered: true
                   onClicked: backend.fetchEvents()
                 }
               }
 
-              Column {
-                width: parent.width
-                spacing: Style.space(6)
-                Repeater {
-                  model: root.filteredEvents()
-                  EventRow {
-                    required property var modelData
-                    required property int index
-                    width: parent.width
-                    ev: modelData
-                    rowIndex: index
-                  }
+              ListView {
+                id: evList
+                Layout.fillWidth: true
+                Layout.fillHeight: true
+                clip: true
+                boundsBehavior: Flickable.StopAtBounds
+                model: root.filteredEvents()
+                spacing: Style.space(4)
+                ScrollBar.vertical: ScrollBar { policy: ScrollBar.AsNeeded }
+
+                delegate: EventRow {
+                  required property var modelData
+                  required property int index
+                  width: evList.width - (evList.ScrollBar.vertical && evList.ScrollBar.vertical.visible ? Style.space(8) : 0)
+                  ev: modelData
+                  rowIndex: index
                 }
               }
 
+              // Events empty state
               Column {
-                visible: !backend.eventsLoading && root.filteredEvents().length === 0
-                width: parent.width
+                Layout.alignment: Qt.AlignCenter
                 spacing: Style.space(4)
+                visible: !backend.eventsLoading && root.filteredEvents().length === 0
                 Text {
-                  width: parent.width
-                  horizontalAlignment: Text.AlignHCenter
+                  anchors.horizontalCenter: parent.horizontalCenter
                   text: "○"
                   color: root.dim
                   font.pixelSize: Style.font.display
                 }
                 Text {
-                  width: parent.width
-                  horizontalAlignment: Text.AlignHCenter
-                  textFormat: Text.PlainText
-                  text: "No events in " + backend.activeNamespace
+                  anchors.horizontalCenter: parent.horizontalCenter
+                  text: "No events recorded"
                   color: root.foreground
                   font.family: root.fontFamily
-                  font.pixelSize: Style.font.body
+                  font.pixelSize: Style.font.bodySmall
                   font.bold: true
                 }
               }
             }
+          }
 
-            // ---- logs view ----
-            Column {
-              visible: root.topMode === "logs"
-              width: parent.width
-              spacing: Style.space(8)
+          // --- VIEW 3: LOGS (Full-Canvas Terminal) ---
+          Item {
+            anchors.fill: parent
+            visible: root.topMode === "logs"
 
-              // Pod picker
-              Column {
-                width: parent.width
-                spacing: Style.space(4)
-                Text {
-                  text: "SELECT POD"
-                  color: root.dim
-                  font.bold: true
-                  font.pixelSize: Style.font.caption
-                }
-                Flickable {
-                  width: parent.width
-                  height: logPodRow.height
-                  contentWidth: logPodRow.width
-                  clip: true
-                  boundsBehavior: Flickable.StopAtBounds
-                  flickableDirection: Flickable.HorizontalFlick
-                  interactive: contentWidth > width
-                  Row {
-                    id: logPodRow
+            ColumnLayout {
+              anchors.fill: parent
+              spacing: Style.space(4)
+
+              // Logs Control Strip
+              RowLayout {
+                Layout.fillWidth: true
+                Layout.margins: Style.space(4)
+                spacing: Style.space(6)
+
+                // Pod Picker Dropdown Button
+                CursorSurface {
+                  implicitHeight: Style.space(26)
+                  implicitWidth: logPodBox.implicitWidth + Style.space(12)
+                  current: root.logPodPickerOpen
+                  foreground: root.foreground
+
+                  RowLayout {
+                    id: logPodBox
+                    anchors.centerIn: parent
                     spacing: Style.space(4)
-                    Repeater {
-                      model: (backend.workloads && backend.workloads.pods) || []
-                      Chip {
-                        required property var modelData
-                        label: String(modelData.name)
-                        active: backend.logPod === String(modelData.name)
-                        onClicked: backend.setLogPod(String(modelData.name))
-                      }
+                    Text {
+                      text: backend.logPod || "Pick Pod ▾"
+                      color: root.foreground
+                      font.family: root.fontFamily
+                      font.pixelSize: Style.font.caption
+                      font.bold: true
+                      elide: Text.ElideRight
+                    }
+                  }
+
+                  MouseArea {
+                    anchors.fill: parent
+                    hoverEnabled: true
+                    cursorShape: Qt.PointingHandCursor
+                    onClicked: {
+                      var next = !root.logPodPickerOpen
+                      root.closeAllPickers()
+                      root.logPodPickerOpen = next
                     }
                   }
                 }
-              }
 
-              // Container picker (if pod has multiple containers)
-              Column {
-                visible: backend.logContainers.length > 1
-                width: parent.width
-                spacing: Style.space(4)
-                Text {
-                  text: "CONTAINER"
-                  color: root.dim
-                  font.bold: true
-                  font.pixelSize: Style.font.caption
-                }
+                // Container Picker (if > 1 container)
                 Row {
-                  id: logCtrRow
+                  visible: backend.logContainers.length > 1
                   spacing: Style.space(4)
                   Repeater {
                     model: backend.logContainers
@@ -1047,100 +1131,39 @@ Panel {
                     }
                   }
                 }
-              }
 
-              // Log Search input
-              RowLayout {
-                width: parent.width
-                spacing: Style.space(4)
-                TextField {
-                  id: logSearchField
-                  Layout.fillWidth: true
-                  foreground: root.foreground
-                  placeholderText: "Search in logs…"
-                  text: root.logSearch
-                  onTextChanged: {
-                    root.logSearch = text
-                    root.currentMatchLine = -1
-                    var m = root.logMatchLines()
-                    if (m.length > 0) {
-                      root.currentMatchLine = m[0]
-                      root.scrollLogTo(m[0])
-                    }
-                  }
-                  Keys.onPressed: function(event) {
-                    if (event.key === Qt.Key_Escape) { clear(); keyCatcher.forceActiveFocus(); event.accepted = true }
-                    else if (event.key === Qt.Key_Return || event.key === Qt.Key_Enter) { root.stepMatch(1); event.accepted = true }
-                  }
-                }
-                Text {
-                  visible: root.logSearch.trim() !== ""
-                  textFormat: Text.PlainText
-                  text: {
-                    var m = root.logMatchLines()
-                    if (m.length === 0) return "0/0"
-                    var pos = m.indexOf(root.currentMatchLine) + 1
-                    return (pos <= 0 ? "–" : pos) + "/" + m.length
-                  }
-                  color: root.dim
-                  font.family: root.fontFamily
-                  font.pixelSize: Style.font.caption
-                }
-                Button {
-                  text: "‹"
-                  fontSize: Style.font.bodySmall
-                  horizontalPadding: Style.space(8)
-                  bordered: true
-                  onClicked: root.stepMatch(-1)
-                }
-                Button {
-                  text: "›"
-                  fontSize: Style.font.bodySmall
-                  horizontalPadding: Style.space(8)
-                  bordered: true
-                  onClicked: root.stepMatch(1)
-                }
-              }
+                Item { Layout.fillWidth: true }
 
-              // Controls: Live Follow, Reload, Export
-              RowLayout {
-                width: parent.width
-                spacing: Style.space(6)
                 Button {
-                  text: backend.logFollow ? "Live: ON" : "Live: OFF"
+                  text: backend.logFollow ? "Follow: ON" : "Follow: OFF"
                   selected: backend.logFollow
+                  fontSize: Style.font.caption
                   bordered: true
                   onClicked: {
                     backend.logFollow = !backend.logFollow
                     if (backend.logFollow) { backend.fetchLogs(); root.scrollLogToBottom() }
                   }
                 }
+
                 Button {
                   text: "Reload"
+                  fontSize: Style.font.caption
                   bordered: true
                   onClicked: backend.fetchLogs()
                 }
+
                 Button {
                   text: "Export"
+                  fontSize: Style.font.caption
                   bordered: true
                   onClicked: backend.exportLogs(String(backend.setting("logExportDir", "") || ""))
                 }
-                Item { Layout.fillWidth: true; height: 1 }
-                Text {
-                  visible: backend.logPod !== ""
-                  textFormat: Text.PlainText
-                  text: backend.logPod + (backend.logContainer !== "" ? " / " + backend.logContainer : "")
-                  color: root.dim
-                  font.family: root.fontFamily
-                  font.pixelSize: Style.font.caption
-                  elide: Text.ElideRight
-                }
               }
 
-              // Terminal container
+              // Terminal Container (Fills 100% of remaining space)
               BorderSurface {
-                width: parent.width
-                height: Style.space(320)
+                Layout.fillWidth: true
+                Layout.fillHeight: true
                 radius: Style.cornerRadius
                 color: Color.surface || "#111318"
                 borderSpec: Border.controlSpec("normal", root.dim, root.accent)
@@ -1149,17 +1172,19 @@ Panel {
                 Flickable {
                   id: logFlick
                   anchors.fill: parent
-                  anchors.margins: Style.space(8)
+                  anchors.margins: Style.space(6)
                   contentWidth: width
                   contentHeight: logLinesColumn.implicitHeight
                   clip: true
                   boundsBehavior: Flickable.StopAtBounds
                   flickableDirection: Flickable.VerticalFlick
                   ScrollBar.vertical: ScrollBar { policy: ScrollBar.AsNeeded }
+
                   Column {
                     id: logLinesColumn
                     width: logFlick.width
-                    spacing: 2
+                    spacing: 1
+
                     Repeater {
                       model: backend.logLines
                       Text {
@@ -1176,369 +1201,669 @@ Panel {
                   }
                 }
               }
-
-              Text {
-                visible: backend.logsLoading
-                width: parent.width
-                horizontalAlignment: Text.AlignHCenter
-                textFormat: Text.PlainText
-                text: "Loading logs for " + backend.logPod + "…"
-                color: root.dim
-                font.family: root.fontFamily
-                font.pixelSize: Style.font.bodySmall
-              }
-
-              Text {
-                visible: !backend.logsLoading && backend.logPod !== "" && backend.logLines.length === 0
-                width: parent.width
-                horizontalAlignment: Text.AlignHCenter
-                textFormat: Text.PlainText
-                text: "No log output for " + backend.logPod
-                color: root.dim
-                font.family: root.fontFamily
-                font.pixelSize: Style.font.bodySmall
-              }
-
-              Text {
-                visible: backend.logPod === ""
-                width: parent.width
-                horizontalAlignment: Text.AlignHCenter
-                textFormat: Text.PlainText
-                text: "Pick a pod above to tail its logs"
-                color: root.dim
-                font.family: root.fontFamily
-                font.pixelSize: Style.font.bodySmall
-              }
             }
+          }
 
-            // ---- workloads error (distinct from empty) ----
-            Column {
-              visible: backend.workloadsError !== ""
-              width: parent.width
-              spacing: Style.space(4)
-              Text {
-                width: parent.width
-                horizontalAlignment: Text.AlignHCenter
-                text: "■"
-                color: root.urgent
-                font.pixelSize: Style.font.display
-              }
-              Text {
-                width: parent.width
-                horizontalAlignment: Text.AlignHCenter
-                textFormat: Text.PlainText
-                text: "Couldn't load workloads"
-                color: root.urgent
-                font.family: root.fontFamily
-                font.pixelSize: Style.font.body
-                font.bold: true
-              }
-              Text {
-                width: parent.width
-                horizontalAlignment: Text.AlignHCenter
-                textFormat: Text.PlainText
-                text: backend.workloadsError
-                color: root.dim
-                font.family: root.fontFamily
-                font.pixelSize: Style.font.caption
-                wrapMode: Text.WordWrap
-              }
-            }
+          // --- VIEW 4: PORT FORWARDS (Dedicated Manager) ---
+          Item {
+            anchors.fill: parent
+            visible: root.topMode === "forwards"
 
-            PanelSeparator { foreground: root.foreground }
-
-            // ---- active port-forwards ----
-            Column {
-              visible: backend.forwards.count > 0
-              width: parent.width
+            ColumnLayout {
+              anchors.fill: parent
+              anchors.margins: Style.space(8)
               spacing: Style.space(8)
-              PanelSectionHeader { text: "PORT FORWARDS"; foreground: root.foreground; fontFamily: root.fontFamily }
 
-              Column {
-                id: fwColumn
-                width: parent.width
-                spacing: Style.space(6)
-                Repeater {
-                  model: backend.forwards
-                  FwRow {
-                    required property int fid
-                    required property string targetKind
-                    required property string target
-                    required property string pod
-                    required property int localPort
-                    required property int remotePort
-                    required property bool ready
-                    width: fwColumn.width
-                    fid: fid
-                    label: ready ? ("localhost:" + localPort + " → " + targetKind + "/" + target)
-                                 : ("starting → " + targetKind + "/" + target + "…")
-                    sub: pod !== "" ? ("pod " + pod + " · remote :" + remotePort) : ("remote :" + remotePort)
-                  }
+              RowLayout {
+                Layout.fillWidth: true
+                Text {
+                  text: "ACTIVE PORT FORWARDS (" + backend.forwards.count + ")"
+                  color: root.dim
+                  font.family: root.fontFamily
+                  font.pixelSize: Style.font.caption
+                  font.bold: true
                 }
-              }
-
-              Row {
-                width: parent.width
-                Chip {
-                  label: "Stop all"
-                  danger: true
+                Item { Layout.fillWidth: true }
+                Button {
+                  visible: backend.forwards.count > 0
+                  text: "Stop All"
+                  foreground: root.urgent
+                  fontSize: Style.font.caption
+                  bordered: true
                   onClicked: backend.stopAllForwards()
                 }
               }
-            }
 
-            PanelSeparator { visible: backend.forwards.count > 0; foreground: root.foreground }
+              ListView {
+                id: fwList
+                Layout.fillWidth: true
+                Layout.fillHeight: true
+                clip: true
+                model: backend.forwards
+                spacing: Style.space(6)
 
-            // ---- settings (collapsible) ----
-            Column {
-              width: parent.width
-              spacing: Style.space(8)
-
-              SectionToggle {
-                title: "SETTINGS"
-                open: root.settingsOpen
-                onToggled: root.settingsOpen = !root.settingsOpen
+                delegate: FwRow {
+                  required property int fid
+                  required property string targetKind
+                  required property string target
+                  required property string pod
+                  required property int localPort
+                  required property int remotePort
+                  required property bool ready
+                  width: fwList.width
+                  fid: fid
+                  label: ready ? ("localhost:" + localPort + " → " + targetKind + "/" + target) : ("starting → " + targetKind + "/" + target + "…")
+                  sub: pod !== "" ? ("pod " + pod + " · remote :" + remotePort) : ("remote :" + remotePort)
+                }
               }
 
+              Text {
+                visible: backend.forwards.count === 0
+                Layout.alignment: Qt.AlignCenter
+                text: "No active port forwards"
+                color: root.dim
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.bodySmall
+              }
+            }
+          }
+
+          // --- VIEW 5: SETTINGS & CONTEXTS (Clean Configuration Form) ---
+          Item {
+            anchors.fill: parent
+            visible: root.topMode === "settings"
+
+            Flickable {
+              anchors.fill: parent
+              anchors.margins: Style.space(10)
+              contentWidth: width
+              contentHeight: settingsCol.implicitHeight + Style.space(20)
+              clip: true
+              boundsBehavior: Flickable.StopAtBounds
+              ScrollBar.vertical: ScrollBar { policy: ScrollBar.AsNeeded }
+
               Column {
-                visible: root.settingsOpen
+                id: settingsCol
                 width: parent.width
-                spacing: Style.space(8)
+                spacing: Style.space(10)
 
+                Text {
+                  text: "CONFIGURATION"
+                  color: root.dim
+                  font.bold: true
+                  font.pixelSize: Style.font.caption
+                }
+
+                // Kubeconfig
                 Column {
-                  width: parent.width
-                  spacing: Style.space(2)
-                  Text {
-                    textFormat: Text.PlainText
-                    text: "Kubeconfig override"
-                    color: root.dim
-                    font.family: root.fontFamily
-                    font.pixelSize: Style.font.caption
-                  }
+                  width: parent.width; spacing: Style.space(2)
+                  Text { text: "Kubeconfig path override"; color: root.dim; font.pixelSize: Style.font.caption }
                   TextField {
-                    width: parent.width
-                    foreground: root.foreground
-                    placeholderText: "Empty = $KUBECONFIG / ~/.kube/config"
+                    width: parent.width; foreground: root.foreground; placeholderText: "Empty = $KUBECONFIG / ~/.kube/config"
                     text: String(backend.setting("kubeconfigPath", "") || "")
-                    onAccepted: {
-                      backend.persist({ kubeconfigPath: text.trim() })
-                      backend.refresh(true)
-                      keyCatcher.forceActiveFocus()
-                    }
+                    onAccepted: { backend.persist({ kubeconfigPath: text.trim() }); backend.refresh(true) }
                   }
                 }
 
+                // Default Namespace
                 Column {
-                  width: parent.width
-                  spacing: Style.space(2)
-                  Text {
-                    textFormat: Text.PlainText
-                    text: "Default namespace"
-                    color: root.dim
-                    font.family: root.fontFamily
-                    font.pixelSize: Style.font.caption
-                  }
+                  width: parent.width; spacing: Style.space(2)
+                  Text { text: "Default namespace"; color: root.dim; font.pixelSize: Style.font.caption }
                   TextField {
-                    width: parent.width
-                    foreground: root.foreground
-                    placeholderText: "default"
+                    width: parent.width; foreground: root.foreground; placeholderText: "default"
                     text: String(backend.setting("defaultNamespace", "") || "")
-                    onAccepted: {
-                      backend.persist({ defaultNamespace: text.trim() })
-                      keyCatcher.forceActiveFocus()
-                    }
+                    onAccepted: { backend.persist({ defaultNamespace: text.trim() }) }
                   }
                 }
 
+                // Log Export Directory
                 Column {
-                  width: parent.width
-                  spacing: Style.space(2)
-                  Text {
-                    textFormat: Text.PlainText
-                    text: "Log export directory"
-                    color: root.dim
-                    font.family: root.fontFamily
-                    font.pixelSize: Style.font.caption
-                  }
+                  width: parent.width; spacing: Style.space(2)
+                  Text { text: "Log export directory"; color: root.dim; font.pixelSize: Style.font.caption }
                   TextField {
-                    width: parent.width
-                    foreground: root.foreground
-                    placeholderText: "~/omakube-logs"
+                    width: parent.width; foreground: root.foreground; placeholderText: "~/omakube-logs"
                     text: String(backend.setting("logExportDir", "") || "")
-                    onAccepted: {
-                      backend.persist({ logExportDir: text.trim() })
-                      keyCatcher.forceActiveFocus()
-                    }
+                    onAccepted: { backend.persist({ logExportDir: text.trim() }) }
                   }
                 }
 
+                // Refresh interval
                 RowLayout {
                   width: parent.width
-                  Text {
-                    Layout.fillWidth: true
-                    textFormat: Text.PlainText
-                    text: "Refresh interval (s)"
-                    color: root.dim
-                    font.family: root.fontFamily
-                    font.pixelSize: Style.font.caption
-                  }
+                  Text { Layout.fillWidth: true; text: "Refresh interval (seconds)"; color: root.foreground; font.pixelSize: Style.font.bodySmall }
                   NumberField {
-                    value: backend.refreshIntervalSec
-                    from: 5
-                    to: 3600
-                    stepSize: 5
+                    value: backend.refreshIntervalSec; from: 5; to: 3600; stepSize: 5
                     foreground: root.foreground
                     onModified: function(v) { backend.persist({ refreshIntervalSec: v }) }
                   }
                 }
 
+                // Read-only mode
                 RowLayout {
                   width: parent.width
                   ColumnLayout {
-                    Layout.fillWidth: true
-                    spacing: 0
-                    Text {
-                      textFormat: Text.PlainText
-                      text: "Read-only mode"
-                      color: root.foreground
-                      font.family: root.fontFamily
-                      font.pixelSize: Style.font.bodySmall
-                    }
-                    Text {
-                      textFormat: Text.PlainText
-                      text: "Disables restart, kill and port-forward"
-                      color: root.dim
-                      font.family: root.fontFamily
-                      font.pixelSize: Style.font.caption
-                    }
+                    Layout.fillWidth: true; spacing: 0
+                    Text { text: "Read-only mode"; color: root.foreground; font.pixelSize: Style.font.bodySmall }
+                    Text { text: "Disables restart, kill pod and port-forward"; color: root.dim; font.pixelSize: Style.font.caption }
                   }
                   ToggleSwitch {
-                    checked: backend.readOnly
-                    foreground: root.foreground
+                    checked: backend.readOnly; foreground: root.foreground
                     onToggled: backend.persist({ readOnly: !backend.readOnly })
                   }
                 }
 
+                // Debug logging
                 RowLayout {
                   width: parent.width
                   ColumnLayout {
-                    Layout.fillWidth: true
-                    spacing: 0
-                    Text {
-                      textFormat: Text.PlainText
-                      text: "Debug logging"
-                      color: root.foreground
-                      font.family: root.fontFamily
-                      font.pixelSize: Style.font.bodySmall
-                    }
-                    Text {
-                      textFormat: Text.PlainText
-                      text: "Verbose backend output for auth issues"
-                      color: root.dim
-                      font.family: root.fontFamily
-                      font.pixelSize: Style.font.caption
-                    }
+                    Layout.fillWidth: true; spacing: 0
+                    Text { text: "Debug logging"; color: root.foreground; font.pixelSize: Style.font.bodySmall }
+                    Text { text: "Verbose backend logging for auth issues"; color: root.dim; font.pixelSize: Style.font.caption }
                   }
                   ToggleSwitch {
-                    checked: backend.debugLogging
-                    foreground: root.foreground
+                    checked: backend.debugLogging; foreground: root.foreground
                     onToggled: backend.persist({ debugLogging: !backend.debugLogging })
                   }
                 }
 
-                Column {
-                  width: parent.width
-                  spacing: Style.space(4)
-                  Text {
-                    textFormat: Text.PlainText
-                    text: "Context accent colors"
-                    color: root.dim
-                    font.family: root.fontFamily
-                    font.pixelSize: Style.font.caption
-                  }
-                  Repeater {
-                    model: backend.contexts
-                    RowLayout {
-                      required property var modelData
-                      width: parent.width
-                      spacing: Style.space(8)
-                      Rectangle {
-                        width: Style.space(12)
-                        height: Style.space(12)
-                        radius: width / 2
-                        Layout.alignment: Qt.AlignVCenter
-                        color: modelData.accent || root.accent
-                        MouseArea {
-                          anchors.fill: parent
-                          hoverEnabled: true
-                          cursorShape: Qt.PointingHandCursor
-                          onClicked: backend.cycleAccent(String(modelData.name))
-                        }
+                PanelSeparator { foreground: root.foreground }
+
+                // Context Accents
+                Text {
+                  text: "CONTEXT ACCENT COLORS"
+                  color: root.dim
+                  font.bold: true
+                  font.pixelSize: Style.font.caption
+                }
+
+                Repeater {
+                  model: backend.contexts
+                  RowLayout {
+                    required property var modelData
+                    width: parent.width
+                    spacing: Style.space(8)
+
+                    Rectangle {
+                      width: Style.space(14); height: Style.space(14); radius: width / 2
+                      color: modelData.accent || root.accent
+                      MouseArea {
+                        anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor
+                        onClicked: backend.cycleAccent(String(modelData.name))
                       }
-                      Text {
-                        Layout.fillWidth: true
-                        textFormat: Text.PlainText
-                        text: String(modelData.name)
-                        color: root.foreground
-                        font.family: root.fontFamily
-                        font.pixelSize: Style.font.bodySmall
-                        elide: Text.ElideRight
-                      }
-                      Text {
-                        textFormat: Text.PlainText
-                        text: String(modelData.accent || "")
-                        color: root.dim
-                        font.family: "monospace"
-                        font.pixelSize: Style.font.caption
-                      }
+                    }
+
+                    Text {
+                      Layout.fillWidth: true
+                      text: String(modelData.name)
+                      color: root.foreground
+                      font.family: root.fontFamily
+                      font.pixelSize: Style.font.bodySmall
+                      font.bold: String(modelData.name) === backend.activeContextName
+                      elide: Text.ElideRight
+                    }
+
+                    Text {
+                      text: String(modelData.accent || "")
+                      color: root.dim
+                      font.family: "monospace"
+                      font.pixelSize: Style.font.caption
                     }
                   }
                 }
               }
             }
+          }
+        }
 
-            PanelSeparator { foreground: root.foreground }
+        // =================================================================
+        // ZONE D: BOTTOM NAVIGATION RAIL (36px)
+        // [ Workloads (N) ]  [ Events (N) ]  [ Logs ]  [ ⇄ Forwards (N) ]  [ ⚙ ]
+        // =================================================================
+        BorderSurface {
+          Layout.fillWidth: true
+          implicitHeight: Style.space(36)
+          color: Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, 0.04)
+          borderSpec: Border.controlSpec("normal", root.dim, root.accent)
 
-            Column {
+          RowLayout {
+            anchors.fill: parent
+            anchors.leftMargin: Style.space(6); anchors.rightMargin: Style.space(6)
+            spacing: Style.space(4)
+
+            Button {
+              Layout.fillWidth: true
+              text: "Workloads (" + root.totalWorkloadCount() + ")"
+              fontSize: Style.font.caption
+              selected: root.topMode === "workloads"
+              bordered: true
+              onClicked: root.switchTab("workloads")
+            }
+
+            Button {
+              Layout.fillWidth: true
+              text: "Events (" + (backend.events ? backend.events.length : 0) + ")"
+              fontSize: Style.font.caption
+              selected: root.topMode === "events"
+              bordered: true
+              onClicked: root.switchTab("events")
+            }
+
+            Button {
+              Layout.fillWidth: true
+              text: "Logs"
+              fontSize: Style.font.caption
+              selected: root.topMode === "logs"
+              bordered: true
+              onClicked: root.switchTab("logs")
+            }
+
+            Button {
+              Layout.fillWidth: true
+              text: backend.forwards.count > 0 ? ("⇄ " + backend.forwards.count) : "Forwards"
+              fontSize: Style.font.caption
+              selected: root.topMode === "forwards"
+              bordered: true
+              onClicked: root.switchTab("forwards")
+            }
+
+            Button {
+              implicitWidth: Style.space(34)
+              text: "⚙"
+              fontSize: Style.font.bodySmall
+              selected: root.topMode === "settings"
+              bordered: true
+              onClicked: root.switchTab("settings")
+            }
+          }
+        }
+      }
+
+      // =================================================================
+      // OVERLAYS: MODAL POPOVERS (Contexts, Namespaces, Kinds, Log Pods)
+      // =================================================================
+
+      // Transparent backdrop to dismiss open pickers
+      MouseArea {
+        anchors.fill: parent
+        z: 99
+        visible: root.contextPickerOpen || root.nsPickerOpen || root.kindPickerOpen || root.logPodPickerOpen
+        onClicked: root.closeAllPickers()
+      }
+
+      // 1. Context Picker Popover
+      BorderSurface {
+        z: 100
+        visible: root.contextPickerOpen
+        anchors.top: parent.top
+        anchors.topMargin: Style.space(36)
+        anchors.left: parent.left
+        anchors.leftMargin: Style.space(8)
+        width: Style.space(300)
+        height: Math.min(Style.space(320), ctxPickerCol.implicitHeight + Style.space(16))
+        radius: Style.cornerRadius
+        color: Color.background || "#181a1f"
+        borderSpec: Border.controlSpec("normal", root.dim, root.accent)
+
+        ColumnLayout {
+          id: ctxPickerCol
+          anchors.fill: parent
+          anchors.margins: Style.space(6)
+          spacing: Style.space(4)
+
+          Text {
+            text: "SELECT CONTEXT"
+            color: root.dim
+            font.bold: true
+            font.pixelSize: Style.font.caption
+          }
+
+          ListView {
+            Layout.fillWidth: true
+            Layout.fillHeight: true
+            clip: true
+            model: backend.contexts
+            spacing: 2
+            delegate: CursorSurface {
+              required property var modelData
               width: parent.width
-              spacing: Style.space(8)
+              implicitHeight: Style.space(36)
+              current: String(modelData.name) === backend.activeContextName
+              foreground: root.foreground
 
-              SectionToggle {
-                title: "CONTEXTS"
-                badge: backend.contexts.length > 0 ? (backend.contexts.length + " available") : ""
-                open: root.contextsOpen
-                onToggled: root.contextsOpen = !root.contextsOpen
+              RowLayout {
+                anchors.fill: parent
+                anchors.leftMargin: Style.space(8); anchors.rightMargin: Style.space(8)
+                spacing: Style.space(6)
+
+                Rectangle {
+                  width: Style.space(8); height: Style.space(8); radius: width / 2
+                  color: Model.healthColor(modelData.health, root.foreground, root.urgent, root.accent)
+                }
+
+                Text {
+                  Layout.fillWidth: true
+                  text: String(modelData.name)
+                  color: root.foreground
+                  font.family: root.fontFamily
+                  font.pixelSize: Style.font.bodySmall
+                  font.bold: String(modelData.name) === backend.activeContextName
+                  elide: Text.ElideRight
+                }
+
+                Text {
+                  visible: modelData.latencyMs !== undefined && modelData.latencyMs >= 0
+                  text: modelData.latencyMs + "ms"
+                  color: root.dim
+                  font.family: "monospace"
+                  font.pixelSize: Style.font.caption
+                }
               }
 
-              Column {
-                id: ctxColumn
-                visible: root.contextsOpen
-                width: parent.width
-                spacing: Style.space(6)
-                Repeater {
-                  model: backend.contexts
-                  ContextRow {
-                    required property var modelData
-                    required property int index
-                    width: ctxColumn.width
-                    ctx: modelData
-                    rowIndex: index
-                  }
+              MouseArea {
+                anchors.fill: parent
+                hoverEnabled: true
+                cursorShape: Qt.PointingHandCursor
+                onClicked: {
+                  backend.setContext(String(modelData.name))
+                  root.closeAllPickers()
                 }
               }
             }
+          }
+        }
+      }
 
-            Item {
-              width: parent.width
-              height: Style.space(6)
+      // 2. Namespace Picker Popover (Searchable, All Namespaces support)
+      BorderSurface {
+        z: 100
+        visible: root.nsPickerOpen
+        anchors.top: parent.top
+        anchors.topMargin: Style.space(36)
+        anchors.left: parent.left
+        anchors.leftMargin: Style.space(40)
+        width: Style.space(320)
+        height: Math.min(Style.space(360), nsPickerCol.implicitHeight + Style.space(16))
+        radius: Style.cornerRadius
+        color: Color.background || "#181a1f"
+        borderSpec: Border.controlSpec("normal", root.dim, root.accent)
+
+        ColumnLayout {
+          id: nsPickerCol
+          anchors.fill: parent
+          anchors.margins: Style.space(6)
+          spacing: Style.space(4)
+
+          TextField {
+            id: nsSearchInput
+            Layout.fillWidth: true
+            placeholderText: "Filter namespaces…"
+            foreground: root.foreground
+          }
+
+          ListView {
+            id: nsListPop
+            Layout.fillWidth: true
+            Layout.fillHeight: true
+            clip: true
+            spacing: 2
+            ScrollBar.vertical: ScrollBar { policy: ScrollBar.AsNeeded }
+            model: {
+              var q = nsSearchInput.text.trim().toLowerCase()
+              var all = backend.namespaces || []
+              if (q === "") return all
+              var out = []
+              for (var i = 0; i < all.length; i++) {
+                if (String(all[i].name).toLowerCase().indexOf(q) >= 0) out.push(all[i])
+              }
+              return out
+            }
+
+            delegate: CursorSurface {
+              required property var modelData
+              width: nsListPop.width - (nsListPop.ScrollBar.vertical && nsListPop.ScrollBar.vertical.visible ? Style.space(8) : 0)
+              implicitHeight: Style.space(32)
+              current: String(modelData.name) === backend.activeNamespace
+              foreground: root.foreground
+
+              RowLayout {
+                anchors.fill: parent
+                anchors.leftMargin: Style.space(8); anchors.rightMargin: Style.space(8)
+                spacing: Style.space(6)
+
+                Text {
+                  Layout.fillWidth: true
+                  text: String(modelData.name) === "*" ? "★ All Namespaces (*)" : String(modelData.name)
+                  color: String(modelData.name) === "*" ? root.accent : root.foreground
+                  font.family: root.fontFamily
+                  font.pixelSize: Style.font.bodySmall
+                  font.bold: String(modelData.name) === backend.activeNamespace
+                  elide: Text.ElideRight
+                }
+
+                Text {
+                  text: modelData.pods !== undefined ? (modelData.pods + " pods") : ""
+                  color: root.dim
+                  font.family: root.fontFamily
+                  font.pixelSize: Style.font.caption
+                }
+
+                Text {
+                  visible: modelData.failing > 0
+                  text: modelData.failing + "✕"
+                  color: root.urgent
+                  font.family: root.fontFamily
+                  font.pixelSize: Style.font.caption
+                  font.bold: true
+                }
+              }
+
+              MouseArea {
+                anchors.fill: parent
+                hoverEnabled: true
+                cursorShape: Qt.PointingHandCursor
+                onClicked: {
+                  backend.setNamespace(String(modelData.name))
+                  root.closeAllPickers()
+                }
+              }
+            }
+          }
+        }
+      }
+
+      // 3. Resource Kind Picker Popover (Categorized with counts)
+      BorderSurface {
+        z: 100
+        visible: root.kindPickerOpen
+        anchors.top: parent.top
+        anchors.topMargin: Style.space(36)
+        anchors.left: parent.left
+        anchors.leftMargin: Style.space(120)
+        width: Style.space(260)
+        height: Math.min(Style.space(360), kindPickerCol.implicitHeight + Style.space(16))
+        radius: Style.cornerRadius
+        color: Color.background || "#181a1f"
+        borderSpec: Border.controlSpec("normal", root.dim, root.accent)
+
+        ColumnLayout {
+          id: kindPickerCol
+          anchors.fill: parent
+          anchors.margins: Style.space(6)
+          spacing: Style.space(4)
+
+          Text {
+            text: "SELECT RESOURCE TYPE"
+            color: root.dim
+            font.bold: true
+            font.pixelSize: Style.font.caption
+          }
+
+          // "All" item
+          CursorSurface {
+            Layout.fillWidth: true
+            implicitHeight: Style.space(28)
+            current: root.selectedResourceKind === "all"
+            foreground: root.foreground
+
+            RowLayout {
+              anchors.fill: parent
+              anchors.leftMargin: Style.space(8); anchors.rightMargin: Style.space(8)
+              Text {
+                Layout.fillWidth: true
+                text: "All Resources"
+                color: root.foreground
+                font.bold: root.selectedResourceKind === "all"
+                font.pixelSize: Style.font.bodySmall
+              }
+              Text {
+                text: String(root.totalWorkloadCount())
+                color: root.dim
+                font.pixelSize: Style.font.caption
+              }
+            }
+
+            MouseArea {
+              anchors.fill: parent
+              hoverEnabled: true
+              cursorShape: Qt.PointingHandCursor
+              onClicked: { root.selectedResourceKind = "all"; root.closeAllPickers() }
+            }
+          }
+
+          ListView {
+            id: kindListPop
+            Layout.fillWidth: true
+            Layout.fillHeight: true
+            clip: true
+            model: root.availableResourceKinds()
+            spacing: 2
+            ScrollBar.vertical: ScrollBar { policy: ScrollBar.AsNeeded }
+
+            delegate: CursorSurface {
+              required property var modelData
+              width: kindListPop.width - (kindListPop.ScrollBar.vertical && kindListPop.ScrollBar.vertical.visible ? Style.space(8) : 0)
+              implicitHeight: Style.space(28)
+              current: root.selectedResourceKind === modelData.id
+              foreground: root.foreground
+
+              RowLayout {
+                anchors.fill: parent
+                anchors.leftMargin: Style.space(8); anchors.rightMargin: Style.space(8)
+                Text {
+                  Layout.fillWidth: true
+                  text: modelData.label
+                  color: root.foreground
+                  font.bold: root.selectedResourceKind === modelData.id
+                  font.pixelSize: Style.font.bodySmall
+                  elide: Text.ElideRight
+                }
+                Text {
+                  text: String(modelData.count)
+                  color: root.dim
+                  font.pixelSize: Style.font.caption
+                }
+              }
+
+              MouseArea {
+                anchors.fill: parent
+                hoverEnabled: true
+                cursorShape: Qt.PointingHandCursor
+                onClicked: { root.selectedResourceKind = modelData.id; root.closeAllPickers() }
+              }
+            }
+          }
+        }
+      }
+
+      // 4. Log Pod Picker Popover (Searchable pods in current namespace)
+      BorderSurface {
+        z: 100
+        visible: root.logPodPickerOpen
+        anchors.top: parent.top
+        anchors.topMargin: Style.space(70)
+        anchors.left: parent.left
+        anchors.leftMargin: Style.space(8)
+        width: Style.space(320)
+        height: Math.min(Style.space(360), logPodCol.implicitHeight + Style.space(16))
+        radius: Style.cornerRadius
+        color: Color.background || "#181a1f"
+        borderSpec: Border.controlSpec("normal", root.dim, root.accent)
+
+        ColumnLayout {
+          id: logPodCol
+          anchors.fill: parent
+          anchors.margins: Style.space(6)
+          spacing: Style.space(4)
+
+          TextField {
+            id: podSearchInput
+            Layout.fillWidth: true
+            placeholderText: "Search pods to view logs…"
+            foreground: root.foreground
+          }
+
+          ListView {
+            id: logPodListPop
+            Layout.fillWidth: true
+            Layout.fillHeight: true
+            clip: true
+            spacing: 2
+            ScrollBar.vertical: ScrollBar { policy: ScrollBar.AsNeeded }
+            model: {
+              var q = podSearchInput.text.trim().toLowerCase()
+              var all = (backend.workloads && backend.workloads.pods) || []
+              if (q === "") return all
+              var out = []
+              for (var i = 0; i < all.length; i++) {
+                if (String(all[i].name).toLowerCase().indexOf(q) >= 0) out.push(all[i])
+              }
+              return out
+            }
+
+            delegate: CursorSurface {
+              required property var modelData
+              width: logPodListPop.width - (logPodListPop.ScrollBar.vertical && logPodListPop.ScrollBar.vertical.visible ? Style.space(8) : 0)
+              implicitHeight: Style.space(30)
+              current: backend.logPod === String(modelData.name)
+              foreground: root.foreground
+
+              RowLayout {
+                anchors.fill: parent
+                anchors.leftMargin: Style.space(8); anchors.rightMargin: Style.space(8)
+                spacing: Style.space(6)
+
+                Rectangle {
+                  width: Style.space(6); height: Style.space(6); radius: width / 2
+                  color: Model.healthColor(modelData.kind, root.foreground, root.urgent, root.accent)
+                }
+
+                Text {
+                  Layout.fillWidth: true
+                  text: String(modelData.name)
+                  color: root.foreground
+                  font.family: root.fontFamily
+                  font.pixelSize: Style.font.bodySmall
+                  font.bold: backend.logPod === String(modelData.name)
+                  elide: Text.ElideRight
+                }
+              }
+
+              MouseArea {
+                anchors.fill: parent
+                hoverEnabled: true
+                cursorShape: Qt.PointingHandCursor
+                onClicked: {
+                  backend.setLogPod(String(modelData.name))
+                  root.closeAllPickers()
+                }
+              }
             }
           }
         }
       }
     }
 
-    // Destructive-action confirmation: names the exact resource +
-    // namespace + context before anything mutates.
+    // Confirmation Modal for Destructive Actions
     Item {
       id: confirmOverlay
       anchors.fill: parent
@@ -1561,7 +1886,6 @@ Panel {
           root.confirmState = null
           if (c) {
             backend.runAction(c.op, c.kind, c.name)
-            // Fresh eyes on the result as soon as it lands.
             Qt.callLater(function() { if (keyCatcher) keyCatcher.forceActiveFocus() })
           }
         }
@@ -1569,7 +1893,7 @@ Panel {
     }
   }
 
-  // ---- forward runners: one process per active forward ----
+  // ---- Forward process runner: one process per forward ----
   Repeater {
     model: backend.forwards
     Process {
@@ -1596,7 +1920,7 @@ Panel {
       }
       Component.onCompleted: {
         fwProc.command = [backend.cliPath, "port-forward",
-          "--context", backend.activeContextName, "--namespace", backend.activeNamespace,
+          "--context", backend.activeContextName, "--namespace", (backend.activeNamespace === "*" ? "default" : backend.activeNamespace),
           "--target-kind", fwProc.targetKind, "--target", fwProc.target,
           "--local-port", fwProc.localPort, "--remote-port", fwProc.remotePort,
           "--timeout", "10"].concat(backend.kubeconfigArgs())
@@ -1605,7 +1929,7 @@ Panel {
     }
   }
 
-  // ---- right-click: lightweight quick context switcher only ----
+  // ---- Right-click quick context switcher ----
   KeyboardPanel {
     anchorItem: pill
     owner: root
@@ -1634,7 +1958,7 @@ Panel {
         id: quickColumn
         width: parent.width - Style.spacing.popupPadding * 2
         anchors.centerIn: parent
-        spacing: Style.space(6)
+        spacing: Style.space(4)
         Repeater {
           model: backend.contexts
           QuickRow {
@@ -1649,176 +1973,83 @@ Panel {
     }
   }
 
-  // ---- rows ----
-  component ContextRow: CursorSurface {
-    id: ctxRow
-    property var ctx: null
-    property int rowIndex: 0
-    readonly property bool isActive: ctx && String(ctx.name) === backend.activeContextName
+  // =================================================================
+  // REUSABLE ROW DELEGATES
+  // =================================================================
 
-    foreground: root.foreground
-    current: isActive
-    implicitHeight: Style.space(46)
-
-    RowLayout {
-      anchors.fill: parent
-      anchors.leftMargin: Style.space(10)
-      anchors.rightMargin: Style.space(10)
-      spacing: Style.space(8)
-
-      ColumnLayout {
-        Layout.fillWidth: true
-        spacing: 1
-        Text {
-          Layout.fillWidth: true
-          textFormat: Text.PlainText
-          text: ctxRow.ctx ? String(ctxRow.ctx.name) : ""
-          color: root.foreground
-          font.family: root.fontFamily
-          font.pixelSize: Style.font.body
-          font.bold: ctxRow.isActive
-          elide: Text.ElideRight
-        }
-        Text {
-          Layout.fillWidth: true
-          textFormat: Text.PlainText
-          text: Model.contextSubtitle(ctxRow.ctx)
-          color: root.dim
-          font.family: root.fontFamily
-          font.pixelSize: Style.font.caption
-          elide: Text.ElideRight
-        }
-      }
-
-      Text {
-        Layout.alignment: Qt.AlignVCenter
-        text: Model.statusGlyph(ctxRow.ctx ? ctxRow.ctx.health : "")
-        color: Model.healthColor(ctxRow.ctx ? ctxRow.ctx.health : "unknown", root.foreground, root.urgent, root.accent)
-        font.family: root.fontFamily
-        font.pixelSize: Style.font.body
-      }
-    }
-
-    MouseArea {
-      anchors.fill: parent
-      hoverEnabled: true
-      cursorShape: Qt.PointingHandCursor
-      onClicked: if (ctxRow.ctx) { backend.setContext(ctxRow.ctx.name) }
-    }
-  }
-
-  component NsChip: CursorSurface {
-    id: nsChip
-    property var ns: null
-    readonly property string nsName: nsChip.ns ? String(nsChip.ns.name) : ""
-    readonly property bool isActive: nsChip.nsName !== "" && nsChip.nsName === backend.activeNamespace
-    readonly property int failing: nsChip.ns ? (nsChip.ns.failing || 0) : 0
-    readonly property int pending: nsChip.ns ? (nsChip.ns.pending || 0) : 0
-
-    foreground: root.foreground
-    current: isActive
-    implicitWidth: nsLabel.implicitWidth + Style.space(20)
-    implicitHeight: Style.space(30)
-
-    Text {
-      id: nsLabel
-      anchors.centerIn: parent
-      textFormat: Text.PlainText
-      text: nsChip.nsName + (nsChip.failing > 0 ? " · " + nsChip.failing + "✕" : "")
-      color: nsChip.failing > 0 ? root.urgent : (nsChip.pending > 0 ? Qt.rgba(0.85, 0.63, 0.23, 1) : root.foreground)
-      font.family: root.fontFamily
-      font.pixelSize: Style.font.bodySmall
-      font.bold: nsChip.isActive
-    }
-
-    MouseArea {
-      id: nsMouse
-      anchors.fill: parent
-      hoverEnabled: true
-      cursorShape: Qt.PointingHandCursor
-      onClicked: if (nsChip.nsName !== "") backend.setNamespace(nsChip.nsName)
-    }
-
-    PanelToolTip {
-      visible: nsMouse.containsMouse
-      text: nsChip.nsName + " · " + (nsChip.ns ? nsChip.ns.pods : 0) + " pods"
-      fontFamily: root.fontFamily
-    }
-  }
-
+  // --- WORKLOAD ROW (High-Density & Virtualized) ---
   component WorkloadRow: CursorSurface {
     id: wlRow
     property var row: null
     property int rowIndex: 0
+    property bool isCompact: true
     readonly property bool expanded: wlRow.row && backend.expandedKey === String(wlRow.row.key)
     readonly property color badgeColor: Model.healthColor(wlRow.row ? wlRow.row.badgeKind : "unknown", root.foreground, root.urgent, root.accent)
 
     foreground: root.foreground
+    implicitHeight: expanded ? (wlInner.implicitHeight + Style.space(8)) : (isCompact ? Style.space(28) : Style.space(42))
     height: implicitHeight
-    implicitHeight: wlInner.implicitHeight + Style.space(8)
 
     Column {
       id: wlInner
       anchors.left: parent.left
       anchors.right: parent.right
       anchors.top: parent.top
-      anchors.margins: Style.space(8)
-      spacing: Style.space(6)
+      anchors.margins: Style.space(4)
+      spacing: Style.space(4)
 
       // Header row
       Item {
-        id: wlHeaderArea
         width: parent.width
-        implicitHeight: wlHeaderRow.implicitHeight
+        height: wlRow.isCompact ? Style.space(22) : wlHeaderRow.implicitHeight
 
         RowLayout {
           id: wlHeaderRow
           anchors.fill: parent
-          spacing: Style.space(8)
+          spacing: Style.space(6)
 
+          // Status dot / glyph
           Text {
             Layout.alignment: Qt.AlignVCenter
             text: Model.statusGlyph(wlRow.row ? wlRow.row.badgeKind : "")
             color: wlRow.badgeColor
             font.family: root.fontFamily
-            font.pixelSize: Style.font.body
+            font.pixelSize: Style.font.bodySmall
           }
 
+          // Compact or comfortable title + meta
           ColumnLayout {
             Layout.fillWidth: true
-            spacing: 2
+            spacing: 0
+
             RowLayout {
               Layout.fillWidth: true
               spacing: Style.space(6)
+
               Text {
                 Layout.fillWidth: true
                 textFormat: Text.PlainText
                 text: wlRow.row ? String(wlRow.row.title) : ""
                 color: root.foreground
                 font.family: root.fontFamily
-                font.pixelSize: Style.font.body
+                font.pixelSize: Style.font.bodySmall
                 font.weight: Font.DemiBold
                 elide: Text.ElideRight
               }
-              // Type tag
-              BorderSurface {
-                visible: wlRow.row && wlRow.row.typeLabel
-                radius: Style.cornerRadius
-                color: Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, 0.08)
-                width: typeLabelText.implicitWidth + Style.space(8)
-                height: typeLabelText.implicitHeight + Style.space(4)
-                Text {
-                  id: typeLabelText
-                  anchors.centerIn: parent
-                  text: wlRow.row ? wlRow.row.typeLabel : ""
-                  color: root.dim
-                  font.family: root.fontFamily
-                  font.pixelSize: Style.font.caption - 1
-                }
+
+              // Namespace badge if viewing all namespaces
+              Text {
+                visible: !!(backend.activeNamespace === "*" && wlRow.row && wlRow.row.namespace)
+                text: wlRow.row ? wlRow.row.namespace : ""
+                color: root.dim
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.caption
               }
             }
 
+            // Comfortable mode: second line meta
             Text {
+              visible: !wlRow.isCompact
               Layout.fillWidth: true
               textFormat: Text.PlainText
               text: wlRow.row ? String(wlRow.row.meta) : ""
@@ -1829,23 +2060,31 @@ Panel {
             }
           }
 
-          // Badge
-          BorderSurface {
-            Layout.alignment: Qt.AlignVCenter
-            radius: Style.cornerRadius
-            color: Qt.rgba(wlRow.badgeColor.r, wlRow.badgeColor.g, wlRow.badgeColor.b, 0.15)
-            width: badgeText.implicitWidth + Style.space(12)
-            height: badgeText.implicitHeight + Style.space(6)
-            Text {
-              id: badgeText
-              anchors.centerIn: parent
-              textFormat: Text.PlainText
-              text: wlRow.row ? String(wlRow.row.badge) : ""
-              color: wlRow.badgeColor
-              font.family: root.fontFamily
-              font.pixelSize: Style.font.caption
-              font.bold: true
-            }
+          // Compact mode: inline metrics
+          Text {
+            visible: !!(wlRow.isCompact && wlRow.row && wlRow.row.rawPod)
+            text: wlRow.row && wlRow.row.rawPod ? (wlRow.row.rawPod.ready + "/" + wlRow.row.rawPod.readyTotal) : ""
+            color: root.foreground
+            font.family: "monospace"
+            font.pixelSize: Style.font.caption
+          }
+
+          Text {
+            visible: !!(wlRow.isCompact && wlRow.row && wlRow.row.rawPod && wlRow.row.rawPod.restarts > 0)
+            text: wlRow.row && wlRow.row.rawPod ? (wlRow.row.rawPod.restarts + "r") : ""
+            color: root.urgent
+            font.family: "monospace"
+            font.pixelSize: Style.font.caption
+            font.bold: true
+          }
+
+          Text {
+            visible: !!(wlRow.isCompact && wlRow.row)
+            text: wlRow.row ? String(wlRow.row.badge) : ""
+            color: wlRow.badgeColor
+            font.family: root.fontFamily
+            font.pixelSize: Style.font.caption
+            font.bold: true
           }
 
           Text {
@@ -1855,7 +2094,6 @@ Panel {
             color: root.dim
             font.family: root.fontFamily
             font.pixelSize: Style.font.caption
-            font.bold: true
           }
         }
 
@@ -1871,91 +2109,66 @@ Panel {
       BorderSurface {
         visible: wlRow.expanded
         width: parent.width
-        height: wlExpandedInner.implicitHeight + Style.space(20)
+        implicitHeight: wlExpandedInner.implicitHeight + Style.space(16)
         radius: Style.cornerRadius
         color: Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, 0.03)
         borderSpec: Border.controlSpec("normal", root.dim, root.accent)
 
         Column {
           id: wlExpandedInner
-          anchors.left: parent.left
-          anchors.right: parent.right
-          anchors.top: parent.top
-          anchors.margins: Style.space(10)
-          spacing: Style.space(8)
+          anchors.left: parent.left; anchors.right: parent.right; anchors.top: parent.top
+          anchors.margins: Style.space(8)
+          spacing: Style.space(6)
 
-          // 1. Pod Containers (if it's a pod with containers)
+          // Pod Containers
           Column {
-            visible: wlRow.row && wlRow.row.rawPod && wlRow.row.rawPod.containers && wlRow.row.rawPod.containers.length > 0
-            width: parent.width
-            spacing: Style.space(4)
-
+            visible: !!(wlRow.row && wlRow.row.rawPod && wlRow.row.rawPod.containers && wlRow.row.rawPod.containers.length > 0)
+            width: parent.width; spacing: Style.space(4)
             Text {
               text: "CONTAINERS (" + (wlRow.row && wlRow.row.rawPod ? wlRow.row.rawPod.containers.length : 0) + ")"
-              color: root.dim
-              font.family: root.fontFamily
-              font.pixelSize: Style.font.caption
-              font.bold: true
+              color: root.dim; font.pixelSize: Style.font.caption; font.bold: true
             }
-
             Repeater {
               model: (wlRow.expanded && wlRow.row && wlRow.row.rawPod) ? wlRow.row.rawPod.containers : []
               BorderSurface {
                 required property var modelData
-                width: parent.width
-                height: ctrRowLayout.implicitHeight + Style.space(12)
+                width: parent.width; implicitHeight: Style.space(26)
                 radius: Style.cornerRadius
-                color: Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, 0.05)
-                borderSpec: Border.controlSpec("normal", root.dim, root.accent)
+                color: Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, 0.04)
 
                 RowLayout {
-                  id: ctrRowLayout
-                  anchors.left: parent.left
-                  anchors.right: parent.right
-                  anchors.verticalCenter: parent.verticalCenter
-                  anchors.leftMargin: Style.space(8)
-                  anchors.rightMargin: Style.space(8)
+                  anchors.fill: parent
+                  anchors.leftMargin: Style.space(6); anchors.rightMargin: Style.space(6)
                   spacing: Style.space(6)
 
                   Rectangle {
-                    width: Style.space(8); height: Style.space(8); radius: width / 2
+                    width: Style.space(6); height: Style.space(6); radius: width / 2
                     color: modelData.ready ? Model.STATUS_HEALTHY : root.urgent
                   }
 
                   Text {
-                    text: modelData.name
-                    color: root.foreground
-                    font.family: root.fontFamily
-                    font.pixelSize: Style.font.bodySmall
-                    font.bold: true
+                    text: modelData.name; color: root.foreground; font.bold: true; font.pixelSize: Style.font.caption
                   }
 
                   Text {
-                    text: Model.shortImage(modelData.image)
-                    color: root.dim
-                    font.family: "monospace"
-                    font.pixelSize: Style.font.caption
-                    Layout.fillWidth: true
-                    elide: Text.ElideRight
+                    text: Model.shortImage(modelData.image); color: root.dim; font.family: "monospace"; font.pixelSize: Style.font.caption
+                    Layout.fillWidth: true; elide: Text.ElideRight
                   }
 
                   Text {
                     text: modelData.state + (modelData.restarts > 0 ? (" · " + modelData.restarts + "r") : "")
-                    color: root.dim
-                    font.family: root.fontFamily
-                    font.pixelSize: Style.font.caption
+                    color: modelData.restarts > 0 ? root.urgent : root.dim; font.pixelSize: Style.font.caption
                   }
 
                   Button {
                     text: "Logs"
                     fontSize: Style.font.caption
-                    horizontalPadding: Style.space(8)
-                    verticalPadding: Style.space(2)
+                    horizontalPadding: Style.space(6); verticalPadding: 1
                     bordered: true
                     onClicked: {
                       backend.setLogPod(wlRow.row.target)
                       backend.setLogContainer(modelData.name)
-                      root.topMode = "logs"
+                      root.switchTab("logs")
                     }
                   }
                 }
@@ -1963,95 +2176,62 @@ Panel {
             }
           }
 
-          // 2. Pod Conditions (status pills)
+          // Pod Conditions
           Column {
-            visible: wlRow.row && wlRow.row.rawPod && wlRow.row.rawPod.conditions && wlRow.row.rawPod.conditions.length > 0
-            width: parent.width
-            spacing: Style.space(4)
-
-            Text {
-              text: "CONDITIONS"
-              color: root.dim
-              font.family: root.fontFamily
-              font.pixelSize: Style.font.caption
-              font.bold: true
-            }
-
+            visible: !!(wlRow.row && wlRow.row.rawPod && wlRow.row.rawPod.conditions && wlRow.row.rawPod.conditions.length > 0)
+            width: parent.width; spacing: Style.space(4)
+            Text { text: "CONDITIONS"; color: root.dim; font.pixelSize: Style.font.caption; font.bold: true }
             Flow {
-              width: parent.width
-              spacing: Style.space(4)
+              width: parent.width; spacing: Style.space(4)
               Repeater {
                 model: (wlRow.expanded && wlRow.row && wlRow.row.rawPod) ? wlRow.row.rawPod.conditions : []
                 BorderSurface {
                   required property var modelData
                   radius: Style.cornerRadius
                   color: modelData.status === "True" ? Qt.rgba(0.27, 0.65, 0.35, 0.15) : Qt.rgba(0.9, 0.28, 0.3, 0.18)
-                  borderSpec: Border.controlSpec("normal", modelData.status === "True" ? Model.STATUS_HEALTHY : root.urgent, root.accent)
-                  width: cndRow.implicitWidth + Style.space(12)
-                  height: cndRow.implicitHeight + Style.space(6)
-                  Row {
-                    id: cndRow
-                    anchors.centerIn: parent
-                    spacing: Style.space(4)
-                    Text {
-                      text: modelData.status === "True" ? "✔" : "✕"
-                      color: modelData.status === "True" ? Model.STATUS_HEALTHY : root.urgent
-                      font.pixelSize: Style.font.caption
-                    }
-                    Text {
-                      text: modelData.type
-                      color: modelData.status === "True" ? root.foreground : root.urgent
-                      font.family: root.fontFamily
-                      font.pixelSize: Style.font.caption
-                      font.bold: modelData.status !== "True"
-                    }
+                  implicitWidth: condText.implicitWidth + Style.space(12); implicitHeight: Style.space(20)
+                  Text {
+                    id: condText; anchors.centerIn: parent
+                    text: (modelData.status === "True" ? "✔ " : "✕ ") + modelData.type
+                    color: modelData.status === "True" ? Model.STATUS_HEALTHY : root.urgent
+                    font.pixelSize: Style.font.caption - 1
                   }
                 }
               }
             }
           }
 
-          // 3. Generic details (for non-pod resources or CRDs)
+          // Generic lines (for non-pods or CRDs)
           Column {
             visible: !wlRow.row || !wlRow.row.rawPod
-            width: parent.width
-            spacing: Style.space(3)
+            width: parent.width; spacing: 2
             Repeater {
               model: (wlRow.expanded && wlRow.row && !wlRow.row.rawPod) ? wlRow.row.lines : []
               Text {
                 required property var modelData
-                width: parent.width
-                textFormat: Text.PlainText
-                text: String(modelData)
-                color: root.dim
-                font.family: root.fontFamily
-                font.pixelSize: Style.font.caption
-                elide: Text.ElideRight
+                width: parent.width; textFormat: Text.PlainText; text: String(modelData)
+                color: root.dim; font.family: root.fontFamily; font.pixelSize: Style.font.caption; elide: Text.ElideRight
               }
             }
           }
 
-          // 4. Action Buttons Bar
+          // Action Buttons Bar
           RowLayout {
             visible: !backend.readOnly
-            width: parent.width
-            spacing: Style.space(6)
+            width: parent.width; spacing: Style.space(6)
 
             Button {
-              visible: wlRow.row && wlRow.row.targetKind === "pod"
+              visible: !!(wlRow.row && wlRow.row.targetKind === "pod")
               text: "View Logs"
-              fontSize: Style.font.bodySmall
+              fontSize: Style.font.caption
               bordered: true
-              onClicked: {
-                backend.setLogPod(wlRow.row.target)
-                root.topMode = "logs"
-              }
+              onClicked: { backend.setLogPod(wlRow.row.target); root.switchTab("logs") }
             }
 
             Button {
-              visible: wlRow.row && (wlRow.row.targetKind === "pod" || wlRow.row.targetKind === "service")
+              visible: !!(wlRow.row && (wlRow.row.targetKind === "pod" || wlRow.row.targetKind === "service"))
               text: "Port Forward"
-              fontSize: Style.font.bodySmall
+              fontSize: Style.font.caption
               bordered: true
               selected: root.forwardFormKey === String(wlRow.row.key)
               onClicked: {
@@ -2062,101 +2242,69 @@ Panel {
             }
 
             Button {
-              visible: wlRow.row && (wlRow.row.targetKind === "deployment" || wlRow.row.targetKind === "statefulset" || wlRow.row.targetKind === "daemonset")
+              visible: !!(wlRow.row && (wlRow.row.targetKind === "deployment" || wlRow.row.targetKind === "statefulset" || wlRow.row.targetKind === "daemonset"))
               text: "Restart"
-              fontSize: Style.font.bodySmall
+              fontSize: Style.font.caption
               bordered: true
               onClicked: root.runRowAction(wlRow.row, "restart")
             }
 
-            Item { Layout.fillWidth: true; height: 1 }
+            Item { Layout.fillWidth: true }
 
             Button {
-              visible: wlRow.row && wlRow.row.targetKind === "pod"
+              visible: !!(wlRow.row && wlRow.row.targetKind === "pod")
               text: "Delete Pod"
-              fontSize: Style.font.bodySmall
+              fontSize: Style.font.caption
               foreground: root.urgent
               bordered: true
               onClicked: root.runRowAction(wlRow.row, "kill")
             }
           }
 
-          // 5. Inline Port-Forward Form
+          // Inline Port-Forward Form
           BorderSurface {
-            visible: wlRow.expanded && wlRow.row && root.forwardFormKey === String(wlRow.row.key)
-            width: parent.width
-            height: fwFormInner.implicitHeight + Style.space(16)
+            visible: !!(wlRow.expanded && wlRow.row && root.forwardFormKey === String(wlRow.row.key))
+            width: parent.width; implicitHeight: fwFormInner.implicitHeight + Style.space(12)
             radius: Style.cornerRadius
             color: Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, 0.05)
             borderSpec: Border.controlSpec("normal", root.dim, root.accent)
 
             Column {
               id: fwFormInner
-              anchors.left: parent.left
-              anchors.right: parent.right
-              anchors.top: parent.top
-              anchors.margins: Style.space(8)
-              spacing: Style.space(6)
+              anchors.left: parent.left; anchors.right: parent.right; anchors.top: parent.top
+              anchors.margins: Style.space(6)
+              spacing: Style.space(4)
 
-              Text {
-                text: "PORT FORWARD"
-                color: root.dim
-                font.bold: true
-                font.pixelSize: Style.font.caption
-              }
+              Text { text: "START PORT FORWARD"; color: root.dim; font.bold: true; font.pixelSize: Style.font.caption }
 
               RowLayout {
-                width: parent.width
-                spacing: Style.space(6)
-
-                Text {
-                  text: "localhost:"
-                  color: root.dim
-                  font.pixelSize: Style.font.bodySmall
-                }
-
+                width: parent.width; spacing: Style.space(4)
+                Text { text: "local :"; color: root.dim; font.pixelSize: Style.font.caption }
                 TextField {
-                  Layout.preferredWidth: Style.space(80)
-                  foreground: root.foreground
-                  placeholderText: "local"
+                  Layout.preferredWidth: Style.space(70)
+                  foreground: root.foreground; placeholderText: "8080"
                   text: root.forwardFormKey === String(wlRow.row.key) ? root.fwLocal : ""
                   onTextChanged: if (root.forwardFormKey === String(wlRow.row.key)) root.fwLocal = text
                 }
-
-                Text {
-                  text: "→ remote :"
-                  color: root.dim
-                  font.pixelSize: Style.font.bodySmall
-                }
-
+                Text { text: "→ remote :"; color: root.dim; font.pixelSize: Style.font.caption }
                 TextField {
-                  Layout.preferredWidth: Style.space(80)
-                  foreground: root.foreground
-                  placeholderText: "remote"
+                  Layout.preferredWidth: Style.space(70)
+                  foreground: root.foreground; placeholderText: "80"
                   text: root.forwardFormKey === String(wlRow.row.key) ? root.fwRemote : ""
                   onTextChanged: if (root.forwardFormKey === String(wlRow.row.key)) root.fwRemote = text
                 }
-
-                Item { Layout.fillWidth: true; height: 1 }
-              }
-
-              RowLayout {
-                width: parent.width
-                spacing: Style.space(6)
-
+                Item { Layout.fillWidth: true }
                 Button {
-                  text: "Start Forward"
-                  selected: true
-                  bordered: true
+                  text: "Start"
+                  selected: true; bordered: true; fontSize: Style.font.caption
                   onClicked: {
                     if (wlRow.row) backend.startForward(String(wlRow.row.targetKind), String(wlRow.row.target), root.fwLocal, root.fwRemote)
                     root.forwardFormKey = ""
                   }
                 }
-
                 Button {
                   text: "Cancel"
-                  bordered: true
+                  bordered: true; fontSize: Style.font.caption
                   onClicked: root.forwardFormKey = ""
                 }
               }
@@ -2167,87 +2315,7 @@ Panel {
     }
   }
 
-  component SectionToggle: Item {
-    id: secToggle
-    property string title: ""
-    property string badge: ""
-    property bool open: false
-    signal toggled()
-
-    width: parent.width
-    height: Math.max(headerText.implicitHeight, Style.space(22))
-
-    RowLayout {
-      anchors.fill: parent
-      spacing: Style.space(6)
-
-      PanelSectionHeader {
-        id: headerText
-        text: secToggle.title
-        foreground: root.foreground
-        fontFamily: root.fontFamily
-      }
-
-      Text {
-        visible: secToggle.badge !== ""
-        textFormat: Text.PlainText
-        text: "· " + secToggle.badge
-        color: root.dim
-        font.family: root.fontFamily
-        font.pixelSize: Style.font.caption
-      }
-
-      Item { Layout.fillWidth: true; height: 1 }
-
-      Text {
-        textFormat: Text.PlainText
-        text: secToggle.open ? "▾" : "▸"
-        color: root.dim
-        font.family: root.fontFamily
-        font.pixelSize: Style.font.caption
-        font.bold: true
-      }
-    }
-
-    MouseArea {
-      anchors.fill: parent
-      hoverEnabled: true
-      cursorShape: Qt.PointingHandCursor
-      onClicked: secToggle.toggled()
-    }
-  }
-
-  component Chip: CursorSurface {
-    id: chip
-    signal clicked()
-    property string label: ""
-    property bool active: false
-    property bool danger: false
-
-    foreground: root.foreground
-    current: chip.active
-    implicitWidth: chipLabel.implicitWidth + Style.space(16)
-    implicitHeight: Style.space(28)
-
-    Text {
-      id: chipLabel
-      anchors.centerIn: parent
-      textFormat: Text.PlainText
-      text: chip.label
-      color: chip.danger ? root.urgent : (chip.active ? root.foreground : root.dim)
-      font.family: root.fontFamily
-      font.pixelSize: Style.font.bodySmall
-      font.bold: chip.active || chip.danger
-    }
-
-    MouseArea {
-      anchors.fill: parent
-      hoverEnabled: true
-      cursorShape: Qt.PointingHandCursor
-      onClicked: chip.clicked()
-    }
-  }
-
+  // --- EVENT ROW DELEGATE ---
   component EventRow: CursorSurface {
     id: evRow
     property var ev: null
@@ -2256,62 +2324,54 @@ Panel {
     readonly property color evColor: evRow.isWarning ? root.urgent : root.dim
 
     foreground: root.foreground
-    implicitHeight: evInner.implicitHeight + Style.spacing.rowPaddingX
+    implicitHeight: evInner.implicitHeight + Style.space(6)
 
     Column {
       id: evInner
-      anchors.left: parent.left
-      anchors.right: parent.right
-      anchors.verticalCenter: parent.verticalCenter
-      anchors.leftMargin: Style.space(10)
-      anchors.rightMargin: Style.space(10)
-      spacing: Style.space(2)
+      anchors.left: parent.left; anchors.right: parent.right; anchors.verticalCenter: parent.verticalCenter
+      anchors.leftMargin: Style.space(8); anchors.rightMargin: Style.space(8)
+      spacing: 1
 
       RowLayout {
-        width: parent.width
-        spacing: Style.space(8)
+        width: parent.width; spacing: Style.space(6)
         Text {
           Layout.alignment: Qt.AlignVCenter
           text: evRow.isWarning ? "▲" : "●"
           color: evRow.evColor
-          font.family: root.fontFamily
-          font.pixelSize: Style.font.body
+          font.family: root.fontFamily; font.pixelSize: Style.font.bodySmall
         }
         Text {
           Layout.fillWidth: true
           textFormat: Text.PlainText
           text: evRow.ev ? (String(evRow.ev.reason) + " · " + String(evRow.ev.object)) : ""
-          color: root.foreground
-          font.family: root.fontFamily
-          font.pixelSize: Style.font.bodySmall
-          font.weight: Font.DemiBold
+          color: root.foreground; font.family: root.fontFamily; font.pixelSize: Style.font.bodySmall; font.bold: true
           elide: Text.ElideRight
+        }
+        Text {
+          visible: !!(evRow.ev && evRow.ev.namespace && backend.activeNamespace === "*")
+          text: evRow.ev ? String(evRow.ev.namespace) : ""
+          color: root.accent; font.family: root.fontFamily; font.pixelSize: Style.font.caption
         }
         Text {
           Layout.alignment: Qt.AlignVCenter
           textFormat: Text.PlainText
           text: evRow.ev ? (String(evRow.ev.age) + (evRow.ev.count > 1 ? " · ×" + evRow.ev.count : "")) : ""
-          color: root.dim
-          font.family: root.fontFamily
-          font.pixelSize: Style.font.caption
+          color: root.dim; font.family: root.fontFamily; font.pixelSize: Style.font.caption
         }
       }
 
       Text {
         width: parent.width
-        visible: evRow.ev && String(evRow.ev.message) !== ""
+        visible: !!(evRow.ev && String(evRow.ev.message) !== "")
         textFormat: Text.PlainText
         text: evRow.ev ? String(evRow.ev.message) : ""
-        color: root.dim
-        font.family: root.fontFamily
-        font.pixelSize: Style.font.caption
-        wrapMode: Text.WordWrap
-        maximumLineCount: 3
-        elide: Text.ElideRight
+        color: root.dim; font.family: root.fontFamily; font.pixelSize: Style.font.caption
+        wrapMode: Text.WordWrap; maximumLineCount: 2; elide: Text.ElideRight
       }
     }
   }
 
+  // --- PORT FORWARD ROW DELEGATE ---
   component FwRow: CursorSurface {
     id: fwRow
     property int fid: -1
@@ -2319,54 +2379,43 @@ Panel {
     property string sub: ""
 
     foreground: root.foreground
-    implicitHeight: Style.space(44)
+    implicitHeight: Style.space(38)
 
     RowLayout {
       anchors.fill: parent
-      anchors.leftMargin: Style.space(10)
-      anchors.rightMargin: Style.space(6)
-      spacing: Style.space(8)
+      anchors.leftMargin: Style.space(8); anchors.rightMargin: Style.space(6)
+      spacing: Style.space(6)
 
       Text {
-        text: "⇄"
-        color: root.accent
-        font.family: root.fontFamily
-        font.pixelSize: Style.font.body
+        text: "⇄"; color: root.accent; font.pixelSize: Style.font.bodySmall
         Layout.alignment: Qt.AlignVCenter
       }
 
       ColumnLayout {
-        Layout.fillWidth: true
-        spacing: 1
+        Layout.fillWidth: true; spacing: 0
         Text {
-          Layout.fillWidth: true
-          textFormat: Text.PlainText
-          text: fwRow.label
-          color: root.foreground
-          font.family: root.fontFamily
-          font.pixelSize: Style.font.bodySmall
-          font.bold: true
+          Layout.fillWidth: true; textFormat: Text.PlainText; text: fwRow.label
+          color: root.foreground; font.family: root.fontFamily; font.pixelSize: Style.font.bodySmall; font.bold: true
           elide: Text.ElideRight
         }
         Text {
-          Layout.fillWidth: true
-          textFormat: Text.PlainText
-          text: fwRow.sub
-          color: root.dim
-          font.family: root.fontFamily
-          font.pixelSize: Style.font.caption
+          Layout.fillWidth: true; textFormat: Text.PlainText; text: fwRow.sub
+          color: root.dim; font.family: root.fontFamily; font.pixelSize: Style.font.caption
           elide: Text.ElideRight
         }
       }
 
-      Chip {
-        label: "Stop"
-        danger: true
+      Button {
+        text: "Stop"
+        foreground: root.urgent
+        fontSize: Style.font.caption
+        bordered: true
         onClicked: backend.stopForward(fwRow.fid)
       }
     }
   }
 
+  // --- QUICK CONTEXT ROW DELEGATE ---
   component QuickRow: CursorSurface {
     id: qRow
     property var ctx: null
@@ -2376,30 +2425,60 @@ Panel {
     foreground: root.foreground
     hasCursor: root.quickIndex === rowIndex
     current: isActive
-    implicitHeight: Style.space(38)
+    implicitHeight: Style.space(32)
 
     RowLayout {
       anchors.fill: parent
-      anchors.leftMargin: Style.space(10)
-      anchors.rightMargin: Style.space(10)
-      spacing: Style.space(8)
+      anchors.leftMargin: Style.space(8); anchors.rightMargin: Style.space(8)
+      spacing: Style.space(6)
+
+      Rectangle {
+        width: Style.space(6); height: Style.space(6); radius: width / 2
+        color: Model.healthColor(qRow.ctx ? qRow.ctx.health : "unknown", root.foreground, root.urgent, root.accent)
+      }
+
       Text {
-        Layout.fillWidth: true
-        textFormat: Text.PlainText
-        text: qRow.ctx ? String(qRow.ctx.name) : ""
-        color: root.foreground
-        font.family: root.fontFamily
-        font.pixelSize: Style.font.body
-        font.bold: qRow.isActive
-        elide: Text.ElideRight
+        Layout.fillWidth: true; textFormat: Text.PlainText; text: qRow.ctx ? String(qRow.ctx.name) : ""
+        color: root.foreground; font.family: root.fontFamily; font.pixelSize: Style.font.bodySmall
+        font.bold: qRow.isActive; elide: Text.ElideRight
       }
     }
+    MouseArea {
+      anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor
+      onEntered: root.quickIndex = qRow.rowIndex
+      onClicked: if (qRow.ctx) { backend.setContext(qRow.ctx.name); root.closeAll() }
+    }
+  }
+
+  // --- CHIP COMPONENT ---
+  component Chip: CursorSurface {
+    id: chip
+    signal clicked()
+    property string label: ""
+    property bool active: false
+    property bool danger: false
+
+    foreground: root.foreground
+    current: chip.active
+    implicitWidth: chipLabel.implicitWidth + Style.space(12)
+    implicitHeight: Style.space(22)
+
+    Text {
+      id: chipLabel
+      anchors.centerIn: parent
+      textFormat: Text.PlainText
+      text: chip.label
+      color: chip.danger ? root.urgent : (chip.active ? root.foreground : root.dim)
+      font.family: root.fontFamily
+      font.pixelSize: Style.font.caption
+      font.bold: chip.active || chip.danger
+    }
+
     MouseArea {
       anchors.fill: parent
       hoverEnabled: true
       cursorShape: Qt.PointingHandCursor
-      onEntered: root.quickIndex = qRow.rowIndex
-      onClicked: if (qRow.ctx) { backend.setContext(qRow.ctx.name); root.closeAll() }
+      onClicked: chip.clicked()
     }
   }
 }

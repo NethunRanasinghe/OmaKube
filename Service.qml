@@ -408,10 +408,16 @@ Item {
   property bool eventsLoading: false
 
   function fetchEvents() {
-    if (evProcess.running || activeContextName === "" || activeNamespace === "") return
+    if (evProcess.running || activeContextName === "") return
     eventsLoading = true
-    evProcess.command = [cliPath, "events", "--context", activeContextName,
-      "--namespace", activeNamespace, "--timeout", "8"].concat(kubeconfigArgs())
+    var cmd = [cliPath, "events", "--context", activeContextName]
+    if (activeNamespace === "*" || activeNamespace === "" || activeNamespace === "all") {
+      cmd.push("--all-namespaces")
+    } else {
+      cmd.push("--namespace", activeNamespace)
+    }
+    cmd.push("--timeout", "8")
+    evProcess.command = cmd.concat(kubeconfigArgs())
     evProcess.running = true
   }
 
@@ -490,11 +496,17 @@ Item {
   }
 
   function fetchWorkloads() {
-    if (wlProcess.running || activeContextName === "" || activeNamespace === "") return
+    if (wlProcess.running || activeContextName === "") return
     workloadsLoading = true
     workloadsError = ""
-    wlProcess.command = [cliPath, "workloads", "--context", activeContextName,
-      "--namespace", activeNamespace, "--timeout", "10"].concat(kubeconfigArgs())
+    var cmd = [cliPath, "workloads", "--context", activeContextName]
+    if (activeNamespace === "*" || activeNamespace === "" || activeNamespace === "all") {
+      cmd.push("--all-namespaces")
+    } else {
+      cmd.push("--namespace", activeNamespace)
+    }
+    cmd.push("--timeout", "12")
+    wlProcess.command = cmd.concat(kubeconfigArgs())
     wlProcess.running = true
   }
 
@@ -508,8 +520,8 @@ Item {
     workloadsLoading = false
     var data = null
     try { data = JSON.parse(stdout) } catch (e) { data = null }
-    if (data && data.pods instanceof Array) {
-      var tabs = ["deployments", "statefulsets", "daemonsets", "services", "jobs"]
+    if (data && typeof data === "object") {
+      var tabs = ["pods", "deployments", "statefulsets", "daemonsets", "services", "jobs", "ingresses", "configmaps", "secrets", "pvc"]
       for (var ti = 0; ti < tabs.length; ti++) {
         if (!(data[tabs[ti]] instanceof Array)) data[tabs[ti]] = []
       }
