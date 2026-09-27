@@ -1530,52 +1530,75 @@ Panel {
       anchors.verticalCenter: parent.verticalCenter
       anchors.leftMargin: Style.space(10)
       anchors.rightMargin: Style.space(10)
-      spacing: Style.space(2)
+      spacing: Style.space(4)
 
-      RowLayout {
+      Item {
+        id: wlHeaderArea
         width: parent.width
-        spacing: Style.space(8)
+        implicitHeight: wlHeaderRow.implicitHeight
 
-        Text {
-          Layout.alignment: Qt.AlignVCenter
-          text: Model.statusGlyph(wlRow.row ? wlRow.row.badgeKind : "")
-          color: wlRow.badgeColor
-          font.family: root.fontFamily
-          font.pixelSize: Style.font.body
-        }
+        RowLayout {
+          id: wlHeaderRow
+          anchors.fill: parent
+          spacing: Style.space(8)
 
-        ColumnLayout {
-          Layout.fillWidth: true
-          spacing: 1
           Text {
-            Layout.fillWidth: true
-            textFormat: Text.PlainText
-            text: wlRow.row ? String(wlRow.row.title) : ""
-            color: root.foreground
+            Layout.alignment: Qt.AlignVCenter
+            text: Model.statusGlyph(wlRow.row ? wlRow.row.badgeKind : "")
+            color: wlRow.badgeColor
             font.family: root.fontFamily
             font.pixelSize: Style.font.body
-            font.weight: Font.DemiBold
-            elide: Text.ElideRight
           }
-          Text {
+
+          ColumnLayout {
             Layout.fillWidth: true
+            spacing: 1
+            Text {
+              Layout.fillWidth: true
+              textFormat: Text.PlainText
+              text: wlRow.row ? String(wlRow.row.title) : ""
+              color: root.foreground
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.body
+              font.weight: Font.DemiBold
+              elide: Text.ElideRight
+            }
+            Text {
+              Layout.fillWidth: true
+              textFormat: Text.PlainText
+              text: wlRow.row ? String(wlRow.row.meta) : ""
+              color: root.dim
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.caption
+              elide: Text.ElideRight
+            }
+          }
+
+          Text {
+            Layout.alignment: Qt.AlignVCenter
             textFormat: Text.PlainText
-            text: wlRow.row ? String(wlRow.row.meta) : ""
+            text: wlRow.row ? String(wlRow.row.badge) : ""
+            color: wlRow.badgeColor
+            font.family: root.fontFamily
+            font.pixelSize: Style.font.bodySmall
+            font.bold: true
+          }
+
+          Text {
+            Layout.alignment: Qt.AlignVCenter
+            textFormat: Text.PlainText
+            text: wlRow.expanded ? "▾" : "▸"
             color: root.dim
             font.family: root.fontFamily
             font.pixelSize: Style.font.caption
-            elide: Text.ElideRight
           }
         }
 
-        Text {
-          Layout.alignment: Qt.AlignVCenter
-          textFormat: Text.PlainText
-          text: wlRow.row ? String(wlRow.row.badge) : ""
-          color: wlRow.badgeColor
-          font.family: root.fontFamily
-          font.pixelSize: Style.font.bodySmall
-          font.bold: true
+        MouseArea {
+          anchors.fill: parent
+          hoverEnabled: true
+          cursorShape: Qt.PointingHandCursor
+          onClicked: if (wlRow.row) backend.toggleExpand(String(wlRow.row.key))
         }
       }
 
@@ -1676,13 +1699,6 @@ Panel {
           }
         }
       }
-    }
-
-    MouseArea {
-      anchors.fill: parent
-      hoverEnabled: true
-      cursorShape: Qt.PointingHandCursor
-      onClicked: if (wlRow.row) backend.toggleExpand(String(wlRow.row.key))
     }
   }
 
