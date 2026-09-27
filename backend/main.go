@@ -87,22 +87,32 @@ func main() {
 		fs := flag.NewFlagSet("workloads", flag.ContinueOnError)
 		ctx := fs.String("context", "", "")
 		ns := fs.String("namespace", "default", "")
+		allNs := fs.Bool("all-namespaces", false, "")
 		timeout := fs.Int("timeout", 10, "")
 		kcfg := fs.String("kubeconfig", "", "")
 		if ferr := fs.Parse(os.Args[2:]); ferr != nil {
 			os.Exit(2)
 		}
-		err = runWorkloads(*ctx, *kcfg, *ns, *timeout)
+		targetNs := *ns
+		if *allNs || targetNs == "*" || targetNs == "all" {
+			targetNs = ""
+		}
+		err = runWorkloads(*ctx, *kcfg, targetNs, *timeout)
 	case "events":
 		fs := flag.NewFlagSet("events", flag.ContinueOnError)
 		ctx := fs.String("context", "", "")
 		ns := fs.String("namespace", "default", "")
+		allNs := fs.Bool("all-namespaces", false, "")
 		timeout := fs.Int("timeout", 8, "")
 		kcfg := fs.String("kubeconfig", "", "")
 		if ferr := fs.Parse(os.Args[2:]); ferr != nil {
 			os.Exit(2)
 		}
-		err = runEvents(*ctx, *kcfg, *ns, *timeout)
+		targetNs := *ns
+		if *allNs || targetNs == "*" || targetNs == "all" {
+			targetNs = ""
+		}
+		err = runEvents(*ctx, *kcfg, targetNs, *timeout)
 	case "logs":
 		fs := flag.NewFlagSet("logs", flag.ContinueOnError)
 		ctx := fs.String("context", "", "")

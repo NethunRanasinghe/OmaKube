@@ -1,5 +1,6 @@
 // Workload browsing: pods, deployments, statefulsets, daemonsets, services,
-// jobs and cronjobs for one namespace in a single call.
+// jobs, cronjobs, ingresses, configmaps, secrets, persistentvolumeclaims, and
+// dynamically discovered CRDs in a single call.
 package main
 
 import (
@@ -12,10 +13,14 @@ import (
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/client-go/dynamic"
+	"k8s.io/client-go/kubernetes"
 )
 
 type podInfo struct {
 	Name       string          `json:"name"`
+	Namespace  string          `json:"namespace,omitempty"`
 	Phase      string          `json:"phase"`
 	Display    string          `json:"display"`
 	Kind       string          `json:"kind"`
@@ -32,6 +37,7 @@ type podInfo struct {
 
 type scaleInfo struct {
 	Name       string `json:"name"`
+	Namespace  string `json:"namespace,omitempty"`
 	Display    string `json:"display"`
 	Kind       string `json:"kind"`
 	Ready      int32  `json:"ready"`
@@ -44,6 +50,7 @@ type scaleInfo struct {
 
 type serviceInfo struct {
 	Name       string `json:"name"`
+	Namespace  string `json:"namespace,omitempty"`
 	Type       string `json:"type"`
 	ClusterIP  string `json:"clusterIP"`
 	Ports      string `json:"ports"`
@@ -53,6 +60,7 @@ type serviceInfo struct {
 
 type jobInfo struct {
 	Name       string `json:"name"`
+	Namespace  string `json:"namespace,omitempty"`
 	Kind       string `json:"kind"` // Job | CronJob
 	StatusKind string `json:"statusKind"`
 	Display    string `json:"display"`
@@ -64,87 +72,149 @@ type jobInfo struct {
 	AgeSeconds int64  `json:"ageSeconds"`
 }
 
+type ingressInfo struct {
+	Name       string `json:"name"`
+	Namespace  string `json:"namespace,omitempty"`
+	Display    string `json:"display"`
+	Kind       string `json:"kind"`
+	Hosts      string `json:"hosts"`
+	Class      string `json:"class"`
+	Age        string `json:"age"`
+	AgeSeconds int64  `json:"ageSeconds"`
+}
+
+type configMapInfo struct {
+	Name       string `json:"name"`
+	Namespace  string `json:"namespace,omitempty"`
+	Display    string `json:"display"`
+	Kind       string `json:"kind"`
+	DataCount  int    `json:"dataCount"`
+	Age        string `json:"age"`
+	AgeSeconds int64  `json:"ageSeconds"`
+}
+
+type secretInfo struct {
+	Name       string `json:"name"`
+	Namespace  string `json:"namespace,omitempty"`
+	Display    string `json:"display"`
+	Kind       string `json:"kind"`
+	Type       string `json:"type"`
+	DataCount  int    `json:"dataCount"`
+	Age        string `json:"age"`
+	AgeSeconds int64  `json:"ageSeconds"`
+}
+
+type pvcInfo struct {
+	Name       string `json:"name"`
+	Namespace  string `json:"namespace,omitempty"`
+	Display    string `json:"display"`
+	Kind       string `json:"kind"`
+	Status     string `json:"status"`
+	Capacity   string `json:"capacity"`
+	Class      string `json:"class"`
+	Age        string `json:"age"`
+	AgeSeconds int64  `json:"ageSeconds"`
+}
+
+type crdResourceInfo struct {
+	Name       string `json:"name"`
+	Namespace  string `json:"namespace,omitempty"`
+	Kind       string `json:"kind"`
+	Display    string `json:"display"`
+	Meta       string `json:"meta,omitempty"`
+	Age        string `json:"age"`
+	AgeSeconds int64  `json:"ageSeconds"`
+}
+
 func runWorkloads(contextName, override, namespace string, timeoutSec int) error {
 	ctxName := strings.TrimSpace(contextName)
 	if ctxName == "" {
 		return fmt.Errorf("workloads: --context is required")
 	}
-	ns := strings.TrimSpace(namespace)
-	if ns == "" {
-		ns = "default"
+	rawNs := strings.TrimSpace(namespace)
+	queryNs := rawNs
+	if rawNs == "*" || rawNs == "all" || rawNs == "" {
+		queryNs = ""
 	}
-	cs, err := clientFor(ctxName, override, timeoutSec)
+
+	dyn, cs, err := dynamicClientFor(ctxName, override, timeoutSec)
 	if err != nil {
 		return err
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), secondsToDuration(timeoutSec))
 	defer cancel()
 
-	result := map[string]any{"namespace": ns}
-
-	pods, err := cs.CoreV1().Pods(ns).List(ctx, metav1.ListOptions{})
-	if err != nil {
-		return fmt.Errorf("pods: %w", err)
+	result := map[string]any{"namespace": rawNs}
+	if rawNs == "" {
+		result["namespace"] = "*"
 	}
-	podInfos := make([]podInfo, 0, len(pods.Items))
-	for i := range pods.Items {
-		p := &pods.Items[i]
-		display, kind := podDisplay(p)
-		var ready, restarts int32
-		containers := make([]containerInfo, 0, len(p.Spec.Containers))
-		statusByName := map[string]corev1.ContainerStatus{}
-		for _, s := range p.Status.ContainerStatuses {
-			statusByName[s.Name] = s
-		}
-		for _, c := range p.Spec.Containers {
-			ci := containerInfo{Name: c.Name, Image: c.Image}
-			if s, ok := statusByName[c.Name]; ok {
-				ci.Ready = s.Ready
-				ci.Restarts = s.RestartCount
-				ci.State = containerState(s)
-				if s.Ready {
-					ready++
-				}
-				restarts += s.RestartCount
-			} else {
-				ci.State = "waiting"
+
+	// 1. Pods
+	if pods, err := cs.CoreV1().Pods(queryNs).List(ctx, metav1.ListOptions{}); err == nil {
+		podInfos := make([]podInfo, 0, len(pods.Items))
+		for i := range pods.Items {
+			p := &pods.Items[i]
+			display, kind := podDisplay(p)
+			var ready, restarts int32
+			containers := make([]containerInfo, 0, len(p.Spec.Containers))
+			statusByName := map[string]corev1.ContainerStatus{}
+			for _, s := range p.Status.ContainerStatuses {
+				statusByName[s.Name] = s
 			}
-			containers = append(containers, ci)
+			for _, c := range p.Spec.Containers {
+				ci := containerInfo{Name: c.Name, Image: c.Image}
+				if s, ok := statusByName[c.Name]; ok {
+					ci.Ready = s.Ready
+					ci.Restarts = s.RestartCount
+					ci.State = containerState(s)
+					if s.Ready {
+						ready++
+					}
+					restarts += s.RestartCount
+				} else {
+					ci.State = "waiting"
+				}
+				containers = append(containers, ci)
+			}
+			conds := make([]conditionInfo, 0, len(p.Status.Conditions))
+			for _, c := range p.Status.Conditions {
+				conds = append(conds, conditionInfo{Type: string(c.Type), Status: string(c.Status), Reason: c.Reason})
+			}
+			podInfos = append(podInfos, podInfo{
+				Name: p.Name, Namespace: p.Namespace, Phase: string(p.Status.Phase), Display: display, Kind: kind,
+				Ready: ready, ReadyTotal: int32(len(p.Spec.Containers)), Restarts: restarts,
+				Age: ageString(p.CreationTimestamp), AgeSeconds: ageSeconds(p.CreationTimestamp),
+				Node: p.Spec.NodeName, PodIP: p.Status.PodIP,
+				Containers: containers, Conditions: conds,
+			})
 		}
-		conds := make([]conditionInfo, 0, len(p.Status.Conditions))
-		for _, c := range p.Status.Conditions {
-			conds = append(conds, conditionInfo{Type: string(c.Type), Status: string(c.Status), Reason: c.Reason})
+		sort.Slice(podInfos, func(i, j int) bool { return podInfos[i].Name < podInfos[j].Name })
+		result["pods"] = podInfos
+	} else {
+		result["pods"] = []podInfo{}
+	}
+
+	// 2. Deployments
+	if deps, err := cs.AppsV1().Deployments(queryNs).List(ctx, metav1.ListOptions{}); err == nil {
+		depInfos := make([]scaleInfo, 0, len(deps.Items))
+		for i := range deps.Items {
+			d := &deps.Items[i]
+			display, kind := deploymentDisplay(d)
+			depInfos = append(depInfos, scaleInfo{
+				Name: d.Name, Namespace: d.Namespace, Display: display, Kind: kind,
+				Ready: d.Status.ReadyReplicas, Desired: d.Status.Replicas,
+				Updated: d.Status.UpdatedReplicas, Available: d.Status.AvailableReplicas,
+				Age: ageString(d.CreationTimestamp), AgeSeconds: ageSeconds(d.CreationTimestamp),
+			})
 		}
-		podInfos = append(podInfos, podInfo{
-			Name: p.Name, Phase: string(p.Status.Phase), Display: display, Kind: kind,
-			Ready: ready, ReadyTotal: int32(len(p.Spec.Containers)), Restarts: restarts,
-			Age: ageString(p.CreationTimestamp), AgeSeconds: ageSeconds(p.CreationTimestamp),
-			Node: p.Spec.NodeName, PodIP: p.Status.PodIP,
-			Containers: containers, Conditions: conds,
-		})
+		sort.Slice(depInfos, func(i, j int) bool { return depInfos[i].Name < depInfos[j].Name })
+		result["deployments"] = depInfos
+	} else {
+		result["deployments"] = []scaleInfo{}
 	}
-	sort.Slice(podInfos, func(i, j int) bool { return podInfos[i].Name < podInfos[j].Name })
-	result["pods"] = podInfos
 
-	deps, err := cs.AppsV1().Deployments(ns).List(ctx, metav1.ListOptions{})
-	if err != nil {
-		return fmt.Errorf("deployments: %w", err)
-	}
-	depInfos := make([]scaleInfo, 0, len(deps.Items))
-	for i := range deps.Items {
-		d := &deps.Items[i]
-		display, kind := deploymentDisplay(d)
-		depInfos = append(depInfos, scaleInfo{
-			Name: d.Name, Display: display, Kind: kind,
-			Ready: d.Status.ReadyReplicas, Desired: d.Status.Replicas,
-			Updated: d.Status.UpdatedReplicas, Available: d.Status.AvailableReplicas,
-			Age: ageString(d.CreationTimestamp), AgeSeconds: ageSeconds(d.CreationTimestamp),
-		})
-	}
-	sort.Slice(depInfos, func(i, j int) bool { return depInfos[i].Name < depInfos[j].Name })
-	result["deployments"] = depInfos
-
-	if stss, err := cs.AppsV1().StatefulSets(ns).List(ctx, metav1.ListOptions{}); err == nil {
+	// 3. StatefulSets
+	if stss, err := cs.AppsV1().StatefulSets(queryNs).List(ctx, metav1.ListOptions{}); err == nil {
 		infos := make([]scaleInfo, 0, len(stss.Items))
 		for i := range stss.Items {
 			s := &stss.Items[i]
@@ -154,7 +224,7 @@ func runWorkloads(contextName, override, namespace string, timeoutSec int) error
 				kind = "waiting"
 			}
 			infos = append(infos, scaleInfo{
-				Name: s.Name, Display: display, Kind: kind,
+				Name: s.Name, Namespace: s.Namespace, Display: display, Kind: kind,
 				Ready: s.Status.ReadyReplicas, Desired: s.Status.Replicas,
 				Updated: s.Status.UpdatedReplicas, Available: s.Status.ReadyReplicas,
 				Age: ageString(s.CreationTimestamp), AgeSeconds: ageSeconds(s.CreationTimestamp),
@@ -162,9 +232,12 @@ func runWorkloads(contextName, override, namespace string, timeoutSec int) error
 		}
 		sort.Slice(infos, func(i, j int) bool { return infos[i].Name < infos[j].Name })
 		result["statefulsets"] = infos
+	} else {
+		result["statefulsets"] = []scaleInfo{}
 	}
 
-	if dss, err := cs.AppsV1().DaemonSets(ns).List(ctx, metav1.ListOptions{}); err == nil {
+	// 4. DaemonSets
+	if dss, err := cs.AppsV1().DaemonSets(queryNs).List(ctx, metav1.ListOptions{}); err == nil {
 		infos := make([]scaleInfo, 0, len(dss.Items))
 		for i := range dss.Items {
 			d := &dss.Items[i]
@@ -174,7 +247,7 @@ func runWorkloads(contextName, override, namespace string, timeoutSec int) error
 				kind = "waiting"
 			}
 			infos = append(infos, scaleInfo{
-				Name: d.Name, Display: display, Kind: kind,
+				Name: d.Name, Namespace: d.Namespace, Display: display, Kind: kind,
 				Ready: d.Status.NumberReady, Desired: d.Status.DesiredNumberScheduled,
 				Updated: d.Status.UpdatedNumberScheduled, Available: d.Status.NumberAvailable,
 				Age: ageString(d.CreationTimestamp), AgeSeconds: ageSeconds(d.CreationTimestamp),
@@ -182,9 +255,12 @@ func runWorkloads(contextName, override, namespace string, timeoutSec int) error
 		}
 		sort.Slice(infos, func(i, j int) bool { return infos[i].Name < infos[j].Name })
 		result["daemonsets"] = infos
+	} else {
+		result["daemonsets"] = []scaleInfo{}
 	}
 
-	if svcs, err := cs.CoreV1().Services(ns).List(ctx, metav1.ListOptions{}); err == nil {
+	// 5. Services
+	if svcs, err := cs.CoreV1().Services(queryNs).List(ctx, metav1.ListOptions{}); err == nil {
 		infos := make([]serviceInfo, 0, len(svcs.Items))
 		for i := range svcs.Items {
 			s := &svcs.Items[i]
@@ -196,16 +272,19 @@ func runWorkloads(contextName, override, namespace string, timeoutSec int) error
 				ports += fmt.Sprintf("%d:%d/%s", p.Port, p.TargetPort.IntVal, p.Protocol)
 			}
 			infos = append(infos, serviceInfo{
-				Name: s.Name, Type: string(s.Spec.Type), ClusterIP: s.Spec.ClusterIP,
+				Name: s.Name, Namespace: s.Namespace, Type: string(s.Spec.Type), ClusterIP: s.Spec.ClusterIP,
 				Ports: ports, Age: ageString(s.CreationTimestamp), AgeSeconds: ageSeconds(s.CreationTimestamp),
 			})
 		}
 		sort.Slice(infos, func(i, j int) bool { return infos[i].Name < infos[j].Name })
 		result["services"] = infos
+	} else {
+		result["services"] = []serviceInfo{}
 	}
 
+	// 6. Jobs & CronJobs
 	jobs := []jobInfo{}
-	if jl, err := cs.BatchV1().Jobs(ns).List(ctx, metav1.ListOptions{}); err == nil {
+	if jl, err := cs.BatchV1().Jobs(queryNs).List(ctx, metav1.ListOptions{}); err == nil {
 		for i := range jl.Items {
 			j := &jl.Items[i]
 			display, st := "Complete", "succeeded"
@@ -215,13 +294,13 @@ func runWorkloads(contextName, override, namespace string, timeoutSec int) error
 				display, st = "Running", "running"
 			}
 			jobs = append(jobs, jobInfo{
-				Name: j.Name, Kind: "Job", StatusKind: st, Display: display,
+				Name: j.Name, Namespace: j.Namespace, Kind: "Job", StatusKind: st, Display: display,
 				Succeeded: j.Status.Succeeded, Failed: j.Status.Failed, Active: j.Status.Active,
 				Age: ageString(j.CreationTimestamp), AgeSeconds: ageSeconds(j.CreationTimestamp),
 			})
 		}
 	}
-	if cl, err := cs.BatchV1().CronJobs(ns).List(ctx, metav1.ListOptions{}); err == nil {
+	if cl, err := cs.BatchV1().CronJobs(queryNs).List(ctx, metav1.ListOptions{}); err == nil {
 		for i := range cl.Items {
 			c := &cl.Items[i]
 			display, st := "Scheduled", "waiting"
@@ -229,7 +308,7 @@ func runWorkloads(contextName, override, namespace string, timeoutSec int) error
 				display, st = "Running", "running"
 			}
 			jobs = append(jobs, jobInfo{
-				Name: c.Name, Kind: "CronJob", StatusKind: st, Display: display, Schedule: c.Spec.Schedule,
+				Name: c.Name, Namespace: c.Namespace, Kind: "CronJob", StatusKind: st, Display: display, Schedule: c.Spec.Schedule,
 				Age: ageString(c.CreationTimestamp), AgeSeconds: ageSeconds(c.CreationTimestamp),
 			})
 		}
@@ -237,12 +316,228 @@ func runWorkloads(contextName, override, namespace string, timeoutSec int) error
 	sort.Slice(jobs, func(i, j int) bool { return jobs[i].Name < jobs[j].Name })
 	result["jobs"] = jobs
 
+	// 7. Ingresses
+	if ings, err := cs.NetworkingV1().Ingresses(queryNs).List(ctx, metav1.ListOptions{}); err == nil && len(ings.Items) > 0 {
+		infos := make([]ingressInfo, 0, len(ings.Items))
+		for i := range ings.Items {
+			ing := &ings.Items[i]
+			hosts := []string{}
+			for _, r := range ing.Spec.Rules {
+				if r.Host != "" {
+					hosts = append(hosts, r.Host)
+				}
+			}
+			className := ""
+			if ing.Spec.IngressClassName != nil {
+				className = *ing.Spec.IngressClassName
+			}
+			infos = append(infos, ingressInfo{
+				Name: ing.Name, Namespace: ing.Namespace, Display: "Active", Kind: "running",
+				Hosts: strings.Join(hosts, ", "), Class: className,
+				Age: ageString(ing.CreationTimestamp), AgeSeconds: ageSeconds(ing.CreationTimestamp),
+			})
+		}
+		sort.Slice(infos, func(i, j int) bool { return infos[i].Name < infos[j].Name })
+		result["ingresses"] = infos
+	}
+
+	// 8. ConfigMaps
+	if cms, err := cs.CoreV1().ConfigMaps(queryNs).List(ctx, metav1.ListOptions{}); err == nil && len(cms.Items) > 0 {
+		infos := make([]configMapInfo, 0, len(cms.Items))
+		for i := range cms.Items {
+			cm := &cms.Items[i]
+			infos = append(infos, configMapInfo{
+				Name: cm.Name, Namespace: cm.Namespace, Display: fmt.Sprintf("%d keys", len(cm.Data)),
+				Kind: "running", DataCount: len(cm.Data),
+				Age: ageString(cm.CreationTimestamp), AgeSeconds: ageSeconds(cm.CreationTimestamp),
+			})
+		}
+		sort.Slice(infos, func(i, j int) bool { return infos[i].Name < infos[j].Name })
+		result["configmaps"] = infos
+	}
+
+	// 9. Secrets
+	if secs, err := cs.CoreV1().Secrets(queryNs).List(ctx, metav1.ListOptions{}); err == nil && len(secs.Items) > 0 {
+		infos := make([]secretInfo, 0, len(secs.Items))
+		for i := range secs.Items {
+			s := &secs.Items[i]
+			infos = append(infos, secretInfo{
+				Name: s.Name, Namespace: s.Namespace, Display: string(s.Type),
+				Kind: "running", Type: string(s.Type), DataCount: len(s.Data),
+				Age: ageString(s.CreationTimestamp), AgeSeconds: ageSeconds(s.CreationTimestamp),
+			})
+		}
+		sort.Slice(infos, func(i, j int) bool { return infos[i].Name < infos[j].Name })
+		result["secrets"] = infos
+	}
+
+	// 10. PersistentVolumeClaims (PVC)
+	if pvcs, err := cs.CoreV1().PersistentVolumeClaims(queryNs).List(ctx, metav1.ListOptions{}); err == nil && len(pvcs.Items) > 0 {
+		infos := make([]pvcInfo, 0, len(pvcs.Items))
+		for i := range pvcs.Items {
+			p := &pvcs.Items[i]
+			status := string(p.Status.Phase)
+			stKind := "running"
+			if p.Status.Phase != corev1.ClaimBound {
+				stKind = "waiting"
+			}
+			scName := ""
+			if p.Spec.StorageClassName != nil {
+				scName = *p.Spec.StorageClassName
+			}
+			capStr := ""
+			if cap, ok := p.Status.Capacity[corev1.ResourceStorage]; ok {
+				capStr = cap.String()
+			}
+			infos = append(infos, pvcInfo{
+				Name: p.Name, Namespace: p.Namespace, Display: status, Kind: stKind,
+				Status: status, Capacity: capStr, Class: scName,
+				Age: ageString(p.CreationTimestamp), AgeSeconds: ageSeconds(p.CreationTimestamp),
+			})
+		}
+		sort.Slice(infos, func(i, j int) bool { return infos[i].Name < infos[j].Name })
+		result["pvc"] = infos
+	}
+
+	// 11. Dynamic Custom Resource Discovery (CRDs)
+	queryCustomResources(ctx, dyn, cs, queryNs, result)
+
 	raw, err := json.Marshal(result)
 	if err != nil {
 		return err
 	}
 	fmt.Println(string(raw))
 	return nil
+}
+
+// queryCustomResources discovers Custom Resource Definitions (CRDs) available on the cluster
+// and queries items in the namespace, populating them into the result map.
+func queryCustomResources(ctx context.Context, dyn dynamic.Interface, cs *kubernetes.Clientset, ns string, result map[string]any) {
+	if dyn == nil || cs == nil {
+		return
+	}
+	lists, err := cs.Discovery().ServerPreferredResources()
+	if err != nil && len(lists) == 0 {
+		return
+	}
+
+	knownGroups := map[string]bool{
+		"":                               true,
+		"apps":                           true,
+		"batch":                          true,
+		"networking.k8s.io":              true,
+		"events.k8s.io":                  true,
+		"coordination.k8s.io":            true,
+		"discovery.k8s.io":               true,
+		"policy":                         true,
+		"authentication.k8s.io":          true,
+		"authorization.k8s.io":           true,
+		"autoscaling":                    true,
+		"admissionregistration.k8s.io":   true,
+		"certificates.k8s.io":            true,
+		"rbac.authorization.k8s.io":      true,
+		"scheduling.k8s.io":              true,
+		"storage.k8s.io":                 true,
+		"metrics.k8s.io":                 true,
+		"flowcontrol.apiserver.k8s.io":   true,
+		"apiregistration.k8s.io":         true,
+		"node.k8s.io":                    true,
+	}
+
+	knownKeys := map[string]bool{
+		"pods":                   true,
+		"deployments":            true,
+		"statefulsets":           true,
+		"daemonsets":             true,
+		"services":               true,
+		"jobs":                   true,
+		"cronjobs":               true,
+		"ingresses":              true,
+		"configmaps":             true,
+		"secrets":                true,
+		"persistentvolumeclaims": true,
+		"pvc":                    true,
+		"namespace":              true,
+		"events":                 true,
+	}
+
+	for _, list := range lists {
+		gv, err := schema.ParseGroupVersion(list.GroupVersion)
+		if err != nil {
+			continue
+		}
+		if knownGroups[gv.Group] {
+			continue
+		}
+
+		for _, res := range list.APIResources {
+			if strings.Contains(res.Name, "/") || knownKeys[res.Name] {
+				continue // Subresources or already tracked standard resources
+			}
+			canList := false
+			for _, v := range res.Verbs {
+				if v == "list" {
+					canList = true
+					break
+				}
+			}
+			if !canList {
+				continue
+			}
+
+			gvr := gv.WithResource(res.Name)
+			var uList any
+			var err error
+			if res.Namespaced && ns != "" {
+				uList, err = dyn.Resource(gvr).Namespace(ns).List(ctx, metav1.ListOptions{Limit: 50})
+			} else if !res.Namespaced && ns != "" {
+				continue // Don't list cluster-wide resources if user filtered to a specific namespace
+			} else {
+				uList, err = dyn.Resource(gvr).List(ctx, metav1.ListOptions{Limit: 50})
+			}
+
+			if err != nil {
+				continue
+			}
+
+			bytes, mErr := json.Marshal(uList)
+			if mErr != nil {
+				continue
+			}
+			var parsed struct {
+				Items []struct {
+					Metadata metav1.ObjectMeta `json:"metadata"`
+					Status   map[string]any    `json:"status"`
+				} `json:"items"`
+			}
+			if pErr := json.Unmarshal(bytes, &parsed); pErr != nil || len(parsed.Items) == 0 {
+				continue
+			}
+
+			items := make([]crdResourceInfo, 0, len(parsed.Items))
+			for _, item := range parsed.Items {
+				statusStr := "Ready"
+				if item.Status != nil {
+					if ph, ok := item.Status["phase"].(string); ok && ph != "" {
+						statusStr = ph
+					} else if st, ok := item.Status["status"].(string); ok && st != "" {
+						statusStr = st
+					}
+				}
+				items = append(items, crdResourceInfo{
+					Name:      item.Metadata.Name,
+					Namespace: item.Metadata.Namespace,
+					Kind:      res.Kind,
+					Display:   statusStr,
+					Meta:      fmt.Sprintf("%s/%s", gv.Group, gv.Version),
+					Age:       ageString(item.Metadata.CreationTimestamp),
+					AgeSeconds: ageSeconds(item.Metadata.CreationTimestamp),
+				})
+			}
+			sort.Slice(items, func(i, j int) bool { return items[i].Name < items[j].Name })
+			result[res.Name] = items
+		}
+	}
 }
 
 func deploymentDisplay(d *appsv1.Deployment) (string, string) {

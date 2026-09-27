@@ -62,11 +62,20 @@ func runNamespaces(contextName, override string, timeoutSec int) error {
 			}
 		}
 	}
-	out := make([]namespaceInfo, 0, len(counts))
+	totalPods := 0
+	totalPending := 0
+	totalFailing := 0
+	out := make([]namespaceInfo, 0, len(counts)+1)
 	for _, v := range counts {
+		totalPods += v.Pods
+		totalPending += v.Pending
+		totalFailing += v.Failing
 		out = append(out, *v)
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
+	allEntry := namespaceInfo{Name: "*", Pods: totalPods, Pending: totalPending, Failing: totalFailing}
+	out = append([]namespaceInfo{allEntry}, out...)
+
 	raw, err := json.Marshal(map[string]any{"namespaces": out})
 	if err != nil {
 		return err

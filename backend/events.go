@@ -14,6 +14,7 @@ import (
 
 type eventInfo struct {
 	Name       string `json:"name"`
+	Namespace  string `json:"namespace,omitempty"`
 	Type       string `json:"type"` // Normal | Warning
 	Reason     string `json:"reason"`
 	Object     string `json:"object"`
@@ -28,10 +29,12 @@ func runEvents(contextName, override, namespace string, timeoutSec int) error {
 	if ctxName == "" {
 		return fmt.Errorf("events: --context is required")
 	}
-	ns := strings.TrimSpace(namespace)
-	if ns == "" {
-		ns = "default"
+	rawNs := strings.TrimSpace(namespace)
+	queryNs := rawNs
+	if rawNs == "*" || rawNs == "all" || rawNs == "" {
+		queryNs = ""
 	}
+
 	cs, err := clientFor(ctxName, override, timeoutSec)
 	if err != nil {
 		return err
@@ -39,7 +42,7 @@ func runEvents(contextName, override, namespace string, timeoutSec int) error {
 	ctx, cancel := context.WithTimeout(context.Background(), secondsToDuration(timeoutSec))
 	defer cancel()
 
-	list, err := cs.CoreV1().Events(ns).List(ctx, metav1.ListOptions{})
+	list, err := cs.CoreV1().Events(queryNs).List(ctx, metav1.ListOptions{})
 	if err != nil {
 		return fmt.Errorf("events: %w", err)
 	}
@@ -56,7 +59,7 @@ func runEvents(contextName, override, namespace string, timeoutSec int) error {
 		}
 		obj := string(e.InvolvedObject.Kind) + "/" + e.InvolvedObject.Name
 		infos = append(infos, eventInfo{
-			Name: e.Name, Type: e.Type, Reason: e.Reason, Object: obj,
+			Name: e.Name, Namespace: e.Namespace, Type: e.Type, Reason: e.Reason, Object: obj,
 			Message: msg, Count: e.Count,
 			Age: ageString(ts), AgeSeconds: ageSeconds(ts),
 		})
@@ -65,7 +68,11 @@ func runEvents(contextName, override, namespace string, timeoutSec int) error {
 	if len(infos) > 100 {
 		infos = infos[:100]
 	}
-	raw, err := json.Marshal(map[string]any{"namespace": ns, "events": infos})
+	outNs := rawNs
+	if outNs == "" {
+		outNs = "*"
+	}
+	raw, err := json.Marshal(map[string]any{"namespace": outNs, "events": infos})
 	if err != nil {
 		return err
 	}
