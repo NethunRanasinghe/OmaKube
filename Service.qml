@@ -372,6 +372,7 @@ Item {
       workloadsLoading = true
       workloads = emptyWorkloads()
       namespaces = []
+      namespacesLoading = true
       events = []
       expandedKey = ""
       logPod = ""
@@ -386,6 +387,7 @@ Item {
       }
       actionStatus = "Switched to " + current
       statusTimer.restart()
+      fetchData()
       refresh(true)
     }
   }
@@ -422,6 +424,7 @@ Item {
 
   // ---- workloads + namespaces (step 3) ----
   property var namespaces: []
+  property bool namespacesLoading: false
   property var workloads: emptyWorkloads()
   property bool workloadsLoading: false
   property bool workloadsFresh: false
@@ -532,6 +535,7 @@ Item {
   }
   function fetchNamespaces() {
     if (nsProcess.running || activeContextName === "") return
+    namespacesLoading = true
     nsProcess.command = [cliPath, "namespaces", "--context", activeContextName, "--timeout", "8"].concat(kubeconfigArgs())
     nsProcess.running = true
   }
@@ -552,6 +556,7 @@ Item {
   }
 
   function parseNamespaces(stdout) {
+    namespacesLoading = false
     var data = null
     try { data = JSON.parse(stdout) } catch (e) { data = null }
     if (data && data.namespaces instanceof Array) namespaces = data.namespaces

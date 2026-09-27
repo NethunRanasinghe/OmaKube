@@ -128,7 +128,7 @@ Panel {
     backend.expandedKey = ""
   }
 
-  function availableResourceKinds() {
+  function availableResourceKinds(includeAll) {
     var w = backend.workloads
     if (!w) return []
     var standard = [
@@ -145,12 +145,14 @@ Panel {
     ]
     var out = []
     var seen = {}
+    var total = 0
     for (var i = 0; i < standard.length; i++) {
       var item = standard[i]
       var list = w[item.key]
       if (list instanceof Array && list.length > 0) {
         out.push({ id: item.key, label: item.label, count: list.length, category: Model.resourceCategory(item.key) })
         seen[item.key] = true
+        total += list.length
       }
     }
     for (var k in w) {
@@ -158,13 +160,17 @@ Panel {
       var customList = w[k]
       if (customList instanceof Array && customList.length > 0) {
         out.push({ id: k, label: Model.formatKindLabel(k), count: customList.length, category: "Custom" })
+        total += customList.length
       }
+    }
+    if (includeAll === true) {
+      out.unshift({ id: "all", label: "All Resources", count: total, category: "All" })
     }
     return out
   }
 
   function totalWorkloadCount() {
-    var kinds = availableResourceKinds()
+    var kinds = availableResourceKinds(false)
     var sum = 0
     for (var i = 0; i < kinds.length; i++) sum += kinds[i].count
     return sum
@@ -172,7 +178,7 @@ Panel {
 
   function currentResourceCount() {
     if (selectedResourceKind === "all") return totalWorkloadCount()
-    var kinds = availableResourceKinds()
+    var kinds = availableResourceKinds(false)
     for (var i = 0; i < kinds.length; i++) {
       if (kinds[i].id === selectedResourceKind) return kinds[i].count
     }
@@ -708,8 +714,8 @@ Panel {
                 spacing: Style.space(4)
 
                 Text {
-                  text: backend.activeNamespace === "*" ? "all namespaces" : backend.activeNamespace
-                  color: backend.activeNamespace === "*" ? root.accent : root.foreground
+                  text: backend.namespacesLoading && (!backend.namespaces || backend.namespaces.length === 0) ? "loading…" : (backend.activeNamespace === "*" ? "all namespaces" : backend.activeNamespace)
+                  color: backend.activeNamespace === "*" ? Color.accent : root.foreground
                   font.family: root.fontFamily
                   font.pixelSize: Style.font.bodySmall
                   font.bold: true
@@ -1016,7 +1022,7 @@ Panel {
             width: parent.width * 0.35
             height: parent.height
             radius: 1
-            color: root.accent
+            color: Color.accent
 
             SequentialAnimation on x {
               running: backend.refreshing
@@ -1119,7 +1125,7 @@ Panel {
                   OmakubeIcon {
                     anchors.fill: parent
                     iconSize: Style.space(32)
-                    color: root.accent
+                    color: Color.accent
                     opacityLevel: 0.95
                   }
                 }
@@ -1742,9 +1748,9 @@ Panel {
             }
 
             Button {
-              implicitWidth: Style.space(34)
-              text: "⚙"
-              fontSize: Style.font.bodySmall
+              Layout.fillWidth: true
+              text: "Settings"
+              fontSize: Style.font.caption
               selected: root.topMode === "settings"
               bordered: true
               onClicked: root.switchTab("settings")
@@ -1875,12 +1881,49 @@ Panel {
             foreground: root.foreground
           }
 
+          // Loading indicator when namespaces are loading
+          Item {
+            Layout.fillWidth: true
+            Layout.fillHeight: true
+            visible: backend.namespacesLoading && (!backend.namespaces || backend.namespaces.length === 0)
+
+            Column {
+              anchors.centerIn: parent
+              spacing: Style.space(6)
+
+              Item {
+                anchors.horizontalCenter: parent.horizontalCenter
+                width: Style.space(24); height: Style.space(24)
+                NumberAnimation on rotation {
+                  from: 0; to: 360; duration: 2000
+                  loops: Animation.Infinite
+                  running: backend.namespacesLoading
+                }
+                OmakubeIcon {
+                  anchors.fill: parent
+                  iconSize: Style.space(24)
+                  color: Color.accent
+                  opacityLevel: 0.9
+                }
+              }
+
+              Text {
+                anchors.horizontalCenter: parent.horizontalCenter
+                text: "Loading namespaces…"
+                color: root.dim
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.caption
+              }
+            }
+          }
+
           ListView {
             id: nsListPop
             Layout.fillWidth: true
             Layout.fillHeight: true
             clip: true
             spacing: 2
+            visible: !backend.namespacesLoading || (backend.namespaces && backend.namespaces.length > 0)
             ScrollBar.vertical: ScrollBar { policy: ScrollBar.AsNeeded }
             model: {
               var q = nsSearchInput.text.trim().toLowerCase()
@@ -1973,44 +2016,12 @@ Panel {
             font.pixelSize: Style.font.caption
           }
 
-          // "All" item
-          CursorSurface {
-            Layout.fillWidth: true
-            implicitHeight: Style.space(28)
-            current: root.selectedResourceKind === "all"
-            foreground: root.foreground
-
-            RowLayout {
-              anchors.fill: parent
-              anchors.leftMargin: Style.space(8); anchors.rightMargin: Style.space(8)
-              Text {
-                Layout.fillWidth: true
-                text: "All Resources"
-                color: root.foreground
-                font.bold: root.selectedResourceKind === "all"
-                font.pixelSize: Style.font.bodySmall
-              }
-              Text {
-                text: String(root.totalWorkloadCount())
-                color: root.dim
-                font.pixelSize: Style.font.caption
-              }
-            }
-
-            MouseArea {
-              anchors.fill: parent
-              hoverEnabled: true
-              cursorShape: Qt.PointingHandCursor
-              onClicked: { root.selectedResourceKind = "all"; root.closeAllPickers() }
-            }
-          }
-
           ListView {
             id: kindListPop
             Layout.fillWidth: true
             Layout.fillHeight: true
             clip: true
-            model: root.availableResourceKinds()
+            model: root.availableResourceKinds(true)
             spacing: 2
             ScrollBar.vertical: ScrollBar { policy: ScrollBar.AsNeeded }
 
