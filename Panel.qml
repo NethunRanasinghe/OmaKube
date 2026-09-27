@@ -535,6 +535,7 @@ Panel {
     function expand(key: string): void { backend.expandedKey = key }
     function setMode(mode: string): void { root.switchTab(mode) }
     function setLogPod(pod: string): void { backend.setLogPod(pod); root.switchTab("logs") }
+    function setNs(ns: string): void { backend.setNamespace(ns) }
     function toggleNs(): void { root.nsPickerOpen = !root.nsPickerOpen }
     function toggleKind(): void { root.kindPickerOpen = !root.kindPickerOpen }
     function toggleCtx(): void { root.contextPickerOpen = !root.contextPickerOpen }
@@ -1044,6 +1045,7 @@ Panel {
               boundsBehavior: Flickable.StopAtBounds
               model: root.filteredWorkloads()
               spacing: Style.space(4)
+              visible: backend.workloadsFresh
               ScrollBar.vertical: ScrollBar { policy: ScrollBar.AsNeeded }
 
               delegate: WorkloadRow {
@@ -1056,17 +1058,53 @@ Panel {
               }
             }
 
-            // Workloads Loading Skeleton
+            // Workloads Loading / Transition Splash Screen
             Column {
-              anchors.fill: parent
-              anchors.margins: Style.space(8)
-              spacing: Style.space(4)
-              visible: backend.workloadsLoading && !backend.workloadsFresh
-              Repeater {
-                model: 8
-                Rectangle {
-                  width: parent.width; height: Style.space(28); radius: Style.cornerRadius
-                  color: root.dim; opacity: 0.18
+              anchors.centerIn: parent
+              spacing: Style.space(8)
+              visible: !backend.workloadsFresh
+
+              Item {
+                anchors.horizontalCenter: parent.horizontalCenter
+                width: Style.space(32)
+                height: Style.space(32)
+
+                Item {
+                  id: wlSpin
+                  anchors.fill: parent
+                  NumberAnimation on rotation {
+                    from: 0; to: 360; duration: 2000
+                    loops: Animation.Infinite
+                    running: backend.workloadsLoading
+                  }
+                  OmakubeIcon {
+                    anchors.fill: parent
+                    iconSize: Style.space(32)
+                    color: root.accent
+                    opacityLevel: 0.95
+                  }
+                }
+              }
+
+              Column {
+                anchors.horizontalCenter: parent.horizontalCenter
+                spacing: Style.space(2)
+
+                Text {
+                  anchors.horizontalCenter: parent.horizontalCenter
+                  text: backend.actionStatus !== "" ? backend.actionStatus : ("Loading " + (backend.activeNamespace === "*" ? "all namespaces" : backend.activeNamespace) + "…")
+                  color: root.foreground
+                  font.family: root.fontFamily
+                  font.pixelSize: Style.font.bodySmall
+                  font.bold: true
+                }
+
+                Text {
+                  anchors.horizontalCenter: parent.horizontalCenter
+                  text: "Querying " + (root.selectedResourceKind === "all" ? "cluster resources" : Model.formatKindLabel(root.selectedResourceKind).toLowerCase()) + " on " + Model.shortLabel(backend.activeContextName)
+                  color: root.dim
+                  font.family: root.fontFamily
+                  font.pixelSize: Style.font.caption
                 }
               }
             }
@@ -1135,6 +1173,7 @@ Panel {
                 boundsBehavior: Flickable.StopAtBounds
                 model: root.filteredEvents()
                 spacing: Style.space(4)
+                visible: !backend.eventsLoading || (backend.events && backend.events.length > 0)
                 ScrollBar.vertical: ScrollBar { policy: ScrollBar.AsNeeded }
 
                 delegate: EventRow {
@@ -1143,6 +1182,49 @@ Panel {
                   width: evList.width - (evList.ScrollBar.vertical.visible ? Style.space(8) : 0)
                   ev: modelData
                   rowIndex: index
+                }
+              }
+
+              // Events Loading Transition
+              Column {
+                Layout.alignment: Qt.AlignCenter
+                spacing: Style.space(8)
+                visible: backend.eventsLoading && (!backend.events || backend.events.length === 0)
+
+                Item {
+                  anchors.horizontalCenter: parent.horizontalCenter
+                  width: Style.space(28); height: Style.space(28)
+                  NumberAnimation on rotation {
+                    from: 0; to: 360; duration: 2000
+                    loops: Animation.Infinite
+                    running: backend.eventsLoading
+                  }
+                  OmakubeIcon {
+                    anchors.fill: parent
+                    iconSize: Style.space(28)
+                    color: root.accent
+                    opacityLevel: 0.95
+                  }
+                }
+
+                Column {
+                  anchors.horizontalCenter: parent.horizontalCenter
+                  spacing: Style.space(2)
+                  Text {
+                    anchors.horizontalCenter: parent.horizontalCenter
+                    text: "Fetching events in " + (backend.activeNamespace === "*" ? "all namespaces" : backend.activeNamespace) + "…"
+                    color: root.foreground
+                    font.family: root.fontFamily
+                    font.pixelSize: Style.font.bodySmall
+                    font.bold: true
+                  }
+                  Text {
+                    anchors.horizontalCenter: parent.horizontalCenter
+                    text: "Querying recent cluster activity"
+                    color: root.dim
+                    font.family: root.fontFamily
+                    font.pixelSize: Style.font.caption
+                  }
                 }
               }
 
@@ -1298,6 +1380,37 @@ Panel {
                         wrapMode: Text.WrapAtWordBoundaryOrAnywhere
                       }
                     }
+                  }
+                }
+
+                // Logs Loading Transition
+                Column {
+                  anchors.centerIn: parent
+                  spacing: Style.space(6)
+                  visible: backend.logsLoading && (!backend.logLines || backend.logLines.length === 0)
+
+                  Item {
+                    anchors.horizontalCenter: parent.horizontalCenter
+                    width: Style.space(24); height: Style.space(24)
+                    NumberAnimation on rotation {
+                      from: 0; to: 360; duration: 2000
+                      loops: Animation.Infinite
+                      running: backend.logsLoading
+                    }
+                    OmakubeIcon {
+                      anchors.fill: parent
+                      iconSize: Style.space(24)
+                      color: root.accent
+                      opacityLevel: 0.95
+                    }
+                  }
+
+                  Text {
+                    anchors.horizontalCenter: parent.horizontalCenter
+                    text: "Streaming logs for " + backend.logPod + "…"
+                    color: root.dim
+                    font.family: root.fontFamily
+                    font.pixelSize: Style.font.bodySmall
                   }
                 }
               }

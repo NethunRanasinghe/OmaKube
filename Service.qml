@@ -414,7 +414,6 @@ Item {
     actionStatus = "Namespace: " + target
     statusTimer.restart()
     fetchWorkloads()
-    refresh(true)
   }
 
   function emptyWorkloads() {
@@ -563,6 +562,11 @@ Item {
     var data = null
     try { data = JSON.parse(stdout) } catch (e) { data = null }
     if (data && typeof data === "object") {
+      var resNs = String(data.namespace || "")
+      if (resNs !== "" && activeNamespace !== "*" && resNs !== activeNamespace) {
+        fetchWorkloads()
+        return
+      }
       var tabs = ["pods", "deployments", "statefulsets", "daemonsets", "services", "jobs", "ingresses", "configmaps", "secrets", "pvc"]
       for (var ti = 0; ti < tabs.length; ti++) {
         if (!(data[tabs[ti]] instanceof Array)) data[tabs[ti]] = []
