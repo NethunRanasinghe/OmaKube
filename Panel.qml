@@ -242,17 +242,21 @@ Panel {
   }
 
   function podLines(p) {
-    var out = ["Node " + (p.node || "?") + " · IP " + (p.podIP || "—") + " · " + p.age]
+    var out = ["Node " + (p.node || "?") + " · IP " + (p.podIP || "—") + " · Age " + p.age]
     var cs = p.containers || []
     for (var i = 0; i < cs.length; i++) {
       var c = cs[i]
       var img = String(c.image || "")
       var short = img.indexOf("/") >= 0 ? img.slice(img.lastIndexOf("/") + 1) : img
-      out.push((c.ready ? "● " : "○ ") + c.name + "  " + short + "  (" + c.state + " · " + c.restarts + " restarts)")
+      out.push((c.ready ? "● " : "○ ") + c.name + " (" + short + ") · " + c.state + (c.restarts > 0 ? " · " + c.restarts + " restarts" : ""))
     }
     var conds = p.conditions || []
     var bits = []
-    for (var j = 0; j < conds.length; j++) bits.push(conds[j].type + "=" + conds[j].status)
+    for (var j = 0; j < conds.length; j++) {
+      var cnd = conds[j]
+      if (cnd.status === "True") bits.push("✔ " + cnd.type)
+      else bits.push("✕ " + cnd.type)
+    }
     if (bits.length > 0) out.push(bits.join("  "))
     return out
   }
@@ -1641,12 +1645,12 @@ Panel {
       Column {
         visible: wlRow.expanded
         width: parent.width
-        spacing: Style.space(2)
+        spacing: Style.space(4)
         Rectangle {
           width: parent.width
           height: 1
           color: root.dim
-          opacity: 0.35
+          opacity: 0.25
         }
         Repeater {
           model: wlRow.expanded && wlRow.row ? wlRow.row.lines : []
@@ -1667,7 +1671,7 @@ Panel {
         Row {
           visible: wlRow.expanded && wlRow.row && !backend.readOnly && root.rowActions(wlRow.row).length > 0
           width: parent.width
-          spacing: Style.space(4)
+          spacing: Style.space(6)
           Repeater {
             model: wlRow.expanded && wlRow.row ? root.rowActions(wlRow.row) : []
             Chip {
@@ -1683,10 +1687,10 @@ Panel {
         Column {
           visible: wlRow.expanded && wlRow.row && root.forwardFormKey === String(wlRow.row.key)
           width: parent.width
-          spacing: Style.space(4)
+          spacing: Style.space(6)
           RowLayout {
             width: parent.width
-            spacing: Style.space(4)
+            spacing: Style.space(6)
             Text {
               textFormat: Text.PlainText
               text: "localhost:"
@@ -1695,7 +1699,7 @@ Panel {
               font.pixelSize: Style.font.caption
             }
             TextField {
-              Layout.preferredWidth: Style.space(64)
+              Layout.preferredWidth: Style.space(72)
               foreground: root.foreground
               placeholderText: "local"
               text: root.forwardFormKey === String(wlRow.row.key) ? root.fwLocal : ""
@@ -1703,13 +1707,13 @@ Panel {
             }
             Text {
               textFormat: Text.PlainText
-              text: "→ :" + (wlRow.row ? String(wlRow.row.remoteHint || "") : "")
+              text: "→ remote :"
               color: root.dim
               font.family: root.fontFamily
               font.pixelSize: Style.font.caption
             }
             TextField {
-              Layout.preferredWidth: Style.space(64)
+              Layout.preferredWidth: Style.space(72)
               foreground: root.foreground
               placeholderText: "remote"
               text: root.forwardFormKey === String(wlRow.row.key) ? root.fwRemote : ""
@@ -1719,7 +1723,7 @@ Panel {
           }
           Row {
             width: parent.width
-            spacing: Style.space(4)
+            spacing: Style.space(6)
             Chip {
               label: "Start"
               active: true
