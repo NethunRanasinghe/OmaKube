@@ -342,6 +342,16 @@ Item {
       return
     }
     actionStatus = "Switching to " + target + "…"
+    workloadsFresh = false
+    workloadsLoading = true
+    workloads = emptyWorkloads()
+    namespaces = []
+    events = []
+    expandedKey = ""
+    logPod = ""
+    logContainer = ""
+    logContainers = []
+    logLines = []
     useProcess.command = [cliPath, "use-context", target].concat(kubeconfigArgs())
     useProcess.running = true
   }
@@ -359,6 +369,10 @@ Item {
     if (current !== "") {
       activeContextName = current
       workloadsFresh = false
+      workloadsLoading = true
+      workloads = emptyWorkloads()
+      namespaces = []
+      events = []
       expandedKey = ""
       logPod = ""
       logContainer = ""
@@ -383,6 +397,10 @@ Item {
       return
     }
     activeNamespace = target
+    workloadsFresh = false
+    workloadsLoading = true
+    workloads = emptyWorkloads()
+    events = []
     expandedKey = ""
     logPod = ""
     logContainer = ""
@@ -399,9 +417,13 @@ Item {
     refresh(true)
   }
 
+  function emptyWorkloads() {
+    return { pods: [], deployments: [], statefulsets: [], daemonsets: [], services: [], jobs: [], ingresses: [], configmaps: [], secrets: [], pvc: [] }
+  }
+
   // ---- workloads + namespaces (step 3) ----
   property var namespaces: []
-  property var workloads: ({ pods: [], deployments: [], statefulsets: [], daemonsets: [], services: [], jobs: [] })
+  property var workloads: emptyWorkloads()
   property bool workloadsLoading: false
   property bool workloadsFresh: false
   property string workloadsError: ""
@@ -421,6 +443,7 @@ Item {
   function fetchEvents() {
     if (evProcess.running || activeContextName === "") return
     eventsLoading = true
+    events = []
     var cmd = [cliPath, "events", "--context", activeContextName]
     if (activeNamespace === "*" || activeNamespace === "" || activeNamespace === "all") {
       cmd.push("--all-namespaces")
