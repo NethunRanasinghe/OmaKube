@@ -536,6 +536,8 @@ Panel {
     function setMode(mode: string): void { root.switchTab(mode) }
     function setLogPod(pod: string): void { backend.setLogPod(pod); root.switchTab("logs") }
     function setNs(ns: string): void { backend.setNamespace(ns) }
+    function setKind(k: string): void { root.selectedResourceKind = k }
+    function setCtx(c: string): void { backend.setContext(c) }
     function toggleNs(): void { root.nsPickerOpen = !root.nsPickerOpen }
     function toggleKind(): void { root.kindPickerOpen = !root.kindPickerOpen }
     function toggleCtx(): void { root.contextPickerOpen = !root.contextPickerOpen }
@@ -995,6 +997,35 @@ Panel {
                 hoverEnabled: true
                 cursorShape: Qt.PointingHandCursor
                 onClicked: root.compactMode = !root.compactMode
+              }
+            }
+          }
+        }
+
+        // Refresh Shimmer Line (2px)
+        Item {
+          Layout.fillWidth: true
+          Layout.leftMargin: Style.space(8)
+          Layout.rightMargin: Style.space(8)
+          implicitHeight: Style.space(2)
+          clip: true
+          visible: backend.refreshing
+
+          Rectangle {
+            id: shimmerBar
+            width: parent.width * 0.35
+            height: parent.height
+            radius: 1
+            color: root.accent
+
+            SequentialAnimation on x {
+              running: backend.refreshing
+              loops: Animation.Infinite
+              NumberAnimation {
+                from: -shimmerBar.width
+                to: shimmerBar.parent.width
+                duration: 900
+                easing.type: Easing.InOutQuad
               }
             }
           }
