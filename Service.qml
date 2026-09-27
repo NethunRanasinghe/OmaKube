@@ -129,6 +129,7 @@ Item {
 
   function setPopupOpen(open) {
     _popupOpen = open === true
+    if (_popupOpen) fetchData()
   }
 
   function refresh(force) {
@@ -305,6 +306,11 @@ Item {
       var a = contexts.slice()
       a[idx] = c
       contexts = a
+
+      if (String(c.name) === activeContextName) {
+        syncActiveState()
+        if (_popupOpen && !workloadsFresh && !workloadsLoading) fetchData()
+      }
     }
     pumpHealth()
   }
@@ -452,9 +458,17 @@ Item {
   }
 
   function fetchLogs() {
-    if (logProcess.running || activeContextName === "" || activeNamespace === "" || logPod === "") return
+    if (logProcess.running || activeContextName === "" || logPod === "") return
     logsLoading = true
-    var cmd = [cliPath, "logs", "--context", activeContextName, "--namespace", activeNamespace,
+    var ns = (activeNamespace === "*" || activeNamespace === "" || activeNamespace === "all") ? "default" : activeNamespace
+    var pods = (workloads && workloads.pods) || []
+    for (var i = 0; i < pods.length; i++) {
+      if (String(pods[i].name) === logPod && pods[i].namespace) {
+        ns = String(pods[i].namespace)
+        break
+      }
+    }
+    var cmd = [cliPath, "logs", "--context", activeContextName, "--namespace", ns,
       "--pod", logPod, "--tail", "200", "--timeout", "10"]
     if (logContainer !== "") cmd.push("--container", logContainer)
     logProcess.command = cmd.concat(kubeconfigArgs())

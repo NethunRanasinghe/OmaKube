@@ -29,6 +29,26 @@ Panel {
     return Model.shortLabel(ctx ? ctx.shortLabel || ctx.name : "k8s")
   }
 
+  implicitWidth: pill.implicitWidth
+  implicitHeight: pill.implicitHeight
+
+  function persistSettings(patch) {
+    if (!root.bar || !root.bar.shell || typeof root.bar.shell.updateEntryInline !== "function") return
+    var entry = { id: root.moduleName }
+    for (var key in root.settings) if (key !== "id") entry[key] = root.settings[key]
+    for (var p in patch) entry[p] = patch[p]
+    root.bar.shell.updateEntryInline(root.moduleName, entry)
+  }
+
+  onOpenedChanged: {
+    backend.setPopupOpen(opened || quickOpened)
+    if (opened) {
+      quickOpened = false
+      backend.refresh(false)
+      Qt.callLater(function() { if (keyCatcher) keyCatcher.forceActiveFocus() })
+    }
+  }
+
   // Navigation states
   property string topMode: "workloads" // "workloads" | "events" | "logs" | "forwards" | "settings"
   property string selectedResourceKind: "all"
@@ -394,7 +414,7 @@ Panel {
     if (!w) return []
     var kinds = availableResourceKinds()
     var rows = []
-    var q = omniSearch.text.trim().toLowerCase()
+    var q = (typeof omniSearch !== "undefined" && omniSearch ? omniSearch.text : "").trim().toLowerCase()
     var nsFilter = ""
     var kindFilter = ""
 
@@ -443,7 +463,7 @@ Panel {
   }
 
   function filteredEvents() {
-    var q = omniSearch.text.trim().toLowerCase()
+    var q = (typeof omniSearch !== "undefined" && omniSearch ? omniSearch.text : "").trim().toLowerCase()
     var evs = backend.events || []
     var out = []
     for (var i = 0; i < evs.length; i++) {
