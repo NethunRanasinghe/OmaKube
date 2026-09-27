@@ -57,10 +57,23 @@ Panel {
     return resourceTabs.indexOf(activeTab) >= 0
   }
 
+  function scrollTabIntoView(tab) {
+    var idx = wlTabs.indexOf(tab)
+    if (idx < 0 || !wlTabRow || idx >= wlTabRow.children.length) return
+    var item = wlTabRow.children[idx]
+    if (!item || !wlTabFlick) return
+    if (item.x < wlTabFlick.contentX) {
+      wlTabFlick.contentX = item.x
+    } else if (item.x + item.width > wlTabFlick.contentX + wlTabFlick.width) {
+      wlTabFlick.contentX = item.x + item.width - wlTabFlick.width
+    }
+  }
+
   function switchTab(tab) {
     activeTab = tab
     backend.expandedKey = ""
     pulseWlList()
+    Qt.callLater(function() { root.scrollTabIntoView(tab) })
     if (tab === "Events") backend.fetchEvents()
     else if (tab === "Logs") ensureLogPod()
   }
@@ -648,6 +661,7 @@ Panel {
               spacing: Style.space(8)
 
               Flickable {
+                id: wlTabFlick
                 width: parent.width
                 height: wlTabRow.height
                 contentWidth: wlTabRow.width
@@ -668,19 +682,29 @@ Panel {
                 }
               }
 
-              Text {
+              RowLayout {
                 width: parent.width
-                horizontalAlignment: Text.AlignRight
-                textFormat: Text.PlainText
-                text: "Sort: " + root.sortMode + " ▾"
-                color: root.dim
-                font.family: root.fontFamily
-                font.pixelSize: Style.font.caption
-                MouseArea {
-                  anchors.fill: parent
-                  hoverEnabled: true
-                  cursorShape: Qt.PointingHandCursor
-                  onClicked: root.cycleSort()
+                Text {
+                  textFormat: Text.PlainText
+                  text: root.activeTab === "Logs" ? "Pod Logs" : (root.activeTab === "Events" ? "Recent Events" : (root.activeTab + " · " + backend.activeNamespace))
+                  color: root.dim
+                  font.family: root.fontFamily
+                  font.pixelSize: Style.font.caption
+                }
+                Item { Layout.fillWidth: true; height: 1 }
+                Text {
+                  visible: root.isResourceTab()
+                  textFormat: Text.PlainText
+                  text: "Sort: " + root.sortMode + " ▾"
+                  color: root.dim
+                  font.family: root.fontFamily
+                  font.pixelSize: Style.font.caption
+                  MouseArea {
+                    anchors.fill: parent
+                    hoverEnabled: true
+                    cursorShape: Qt.PointingHandCursor
+                    onClicked: root.cycleSort()
+                  }
                 }
               }
 
@@ -1491,16 +1515,22 @@ Panel {
     id: wlTab
     property string tab: ""
 
+    function labelText() {
+      if (wlTab.tab === "Logs") return "Logs"
+      var cnt = backend.tabCount(wlTab.tab)
+      return cnt > 0 ? (wlTab.tab + " " + cnt) : wlTab.tab
+    }
+
     foreground: root.foreground
     current: root.activeTab === wlTab.tab
-    implicitWidth: tabLabel.implicitWidth + Style.space(16)
+    implicitWidth: tabLabel.implicitWidth + Style.space(14)
     implicitHeight: Style.space(28)
 
     Text {
       id: tabLabel
       anchors.centerIn: parent
       textFormat: Text.PlainText
-      text: wlTab.tab + " " + backend.tabCount(wlTab.tab)
+      text: wlTab.labelText()
       color: root.activeTab === wlTab.tab ? root.foreground : root.dim
       font.family: root.fontFamily
       font.pixelSize: Style.font.bodySmall

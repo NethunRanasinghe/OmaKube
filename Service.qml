@@ -536,6 +536,7 @@ Item {
     if (tab === "DS") return w.daemonsets.length
     if (tab === "Svc") return w.services.length
     if (tab === "Jobs") return w.jobs.length
+    if (tab === "Events") return events ? events.length : 0
     return 0
   }
 
