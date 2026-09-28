@@ -9,12 +9,12 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"sync"
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
-	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/metadata"
 	"k8s.io/client-go/rest"
@@ -139,7 +139,7 @@ func runWorkloads(contextName, override, namespace string, timeoutSec int) error
 		queryNs = ""
 	}
 
-	dyn, cs, cfg, err := dynamicClientFor(ctxName, override, timeoutSec)
+	_, cs, cfg, err := dynamicClientFor(ctxName, override, timeoutSec)
 	if err != nil {
 		return err
 	}
@@ -344,7 +344,7 @@ func runWorkloads(contextName, override, namespace string, timeoutSec int) error
 	}
 
 	// 8. ConfigMaps: Table query avoids retrieving large data payloads into memory.
-	if cms := fetchConfigMaps(ctx, cs, queryNs, defaultListLimit); len(cms) > 0 {
+	if cms := fetchConfigMaps(ctx, cs, cfg, queryNs, defaultListLimit); len(cms) > 0 {
 		result["configmaps"] = cms
 	}
 
@@ -382,8 +382,8 @@ func runWorkloads(contextName, override, namespace string, timeoutSec int) error
 		result["pvc"] = infos
 	}
 
-	// 11. Dynamic Custom Resource Discovery (CRDs)
-	queryCustomResources(ctx, dyn, cs, queryNs, result)
+	// 11. Dynamic Custom Resource Discovery (CRDs) — metadata-only/Table queries with strict bounds.
+	queryCustomResources(ctx, cs, cfg, queryNs, result)
 
 	raw, err := json.Marshal(result)
 	if err != nil {
@@ -394,9 +394,10 @@ func runWorkloads(contextName, override, namespace string, timeoutSec int) error
 }
 
 // queryCustomResources discovers Custom Resource Definitions (CRDs) available on the cluster
-// and queries items in the namespace, populating them into the result map.
-func queryCustomResources(ctx context.Context, dyn dynamic.Interface, cs *kubernetes.Clientset, ns string, result map[string]any) {
-	if dyn == nil || cs == nil {
+// and queries items concurrently using metadata-only/Table requests.
+// It never downloads full objects, spec definitions, or sensitive credentials.
+func queryCustomResources(ctx context.Context, cs *kubernetes.Clientset, cfg *rest.Config, ns string, result map[string]any) {
+	if cs == nil || cfg == nil {
 		return
 	}
 	lists, err := cs.Discovery().ServerPreferredResources()
@@ -404,27 +405,29 @@ func queryCustomResources(ctx context.Context, dyn dynamic.Interface, cs *kubern
 		return
 	}
 
+	metaClient, _ := metadata.NewForConfig(cfg)
+
 	knownGroups := map[string]bool{
-		"":                               true,
-		"apps":                           true,
-		"batch":                          true,
-		"networking.k8s.io":              true,
-		"events.k8s.io":                  true,
-		"coordination.k8s.io":            true,
-		"discovery.k8s.io":               true,
-		"policy":                         true,
-		"authentication.k8s.io":          true,
-		"authorization.k8s.io":           true,
-		"autoscaling":                    true,
-		"admissionregistration.k8s.io":   true,
-		"certificates.k8s.io":            true,
-		"rbac.authorization.k8s.io":      true,
-		"scheduling.k8s.io":              true,
-		"storage.k8s.io":                 true,
-		"metrics.k8s.io":                 true,
-		"flowcontrol.apiserver.k8s.io":   true,
-		"apiregistration.k8s.io":         true,
-		"node.k8s.io":                    true,
+		"":                             true,
+		"apps":                         true,
+		"batch":                        true,
+		"networking.k8s.io":            true,
+		"events.k8s.io":                true,
+		"coordination.k8s.io":          true,
+		"discovery.k8s.io":             true,
+		"policy":                       true,
+		"authentication.k8s.io":        true,
+		"authorization.k8s.io":         true,
+		"autoscaling":                  true,
+		"admissionregistration.k8s.io": true,
+		"certificates.k8s.io":          true,
+		"rbac.authorization.k8s.io":    true,
+		"scheduling.k8s.io":            true,
+		"storage.k8s.io":               true,
+		"metrics.k8s.io":               true,
+		"flowcontrol.apiserver.k8s.io": true,
+		"apiregistration.k8s.io":       true,
+		"node.k8s.io":                  true,
 	}
 
 	knownKeys := map[string]bool{
@@ -444,6 +447,13 @@ func queryCustomResources(ctx context.Context, dyn dynamic.Interface, cs *kubern
 		"events":                 true,
 	}
 
+	type crdTarget struct {
+		gvr schema.GroupVersionResource
+		gv  schema.GroupVersion
+		res metav1.APIResource
+	}
+
+	var targets []crdTarget
 	for _, list := range lists {
 		gv, err := schema.ParseGroupVersion(list.GroupVersion)
 		if err != nil {
@@ -467,60 +477,152 @@ func queryCustomResources(ctx context.Context, dyn dynamic.Interface, cs *kubern
 			if !canList {
 				continue
 			}
-
-			gvr := gv.WithResource(res.Name)
-			var uList any
-			var err error
-			if res.Namespaced && ns != "" {
-				uList, err = dyn.Resource(gvr).Namespace(ns).List(ctx, metav1.ListOptions{Limit: 50})
-			} else if !res.Namespaced && ns != "" {
+			if !res.Namespaced && ns != "" {
 				continue // Don't list cluster-wide resources if user filtered to a specific namespace
-			} else {
-				uList, err = dyn.Resource(gvr).List(ctx, metav1.ListOptions{Limit: 50})
 			}
 
-			if err != nil {
-				continue
-			}
+			targets = append(targets, crdTarget{
+				gvr: gv.WithResource(res.Name),
+				gv:  gv,
+				res: res,
+			})
+		}
+	}
 
-			bytes, mErr := json.Marshal(uList)
-			if mErr != nil {
-				continue
-			}
-			var parsed struct {
-				Items []struct {
-					Metadata metav1.ObjectMeta `json:"metadata"`
-					Status   map[string]any    `json:"status"`
-				} `json:"items"`
-			}
-			if pErr := json.Unmarshal(bytes, &parsed); pErr != nil || len(parsed.Items) == 0 {
-				continue
-			}
+	if len(targets) == 0 {
+		return
+	}
 
-			items := make([]crdResourceInfo, 0, len(parsed.Items))
-			for _, item := range parsed.Items {
-				statusStr := "Ready"
-				if item.Status != nil {
-					if ph, ok := item.Status["phase"].(string); ok && ph != "" {
-						statusStr = ph
-					} else if st, ok := item.Status["status"].(string); ok && st != "" {
-						statusStr = st
-					}
+	// Concurrently query CRDs using a worker pool for maximum responsiveness while bounding memory and network load.
+	var mu sync.Mutex
+	const workers = 8
+	jobs := make(chan crdTarget, len(targets))
+	for _, t := range targets {
+		jobs <- t
+	}
+	close(jobs)
+
+	var wg sync.WaitGroup
+	for w := 0; w < workers; w++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for target := range jobs {
+				select {
+				case <-ctx.Done():
+					return
+				default:
 				}
+				items := fetchCRDItems(ctx, cs, metaClient, target.gvr, target.gv, target.res, ns, maxCRDItemsPerType)
+				if len(items) > 0 {
+					mu.Lock()
+					result[target.res.Name] = items
+					mu.Unlock()
+				}
+			}
+		}()
+	}
+	wg.Wait()
+}
+
+// fetchCRDItems retrieves items for a custom resource using Table or PartialObjectMetadata.
+// It never fetches full objects, spec definitions, or sensitive credentials.
+func fetchCRDItems(ctx context.Context, cs *kubernetes.Clientset, metaClient metadata.Interface, gvr schema.GroupVersionResource, gv schema.GroupVersion, res metav1.APIResource, ns string, limit int64) []crdResourceInfo {
+	var path string
+	if res.Namespaced && ns != "" {
+		path = fmt.Sprintf("/apis/%s/%s/namespaces/%s/%s", gvr.Group, gvr.Version, ns, gvr.Resource)
+	} else {
+		path = fmt.Sprintf("/apis/%s/%s/%s", gvr.Group, gvr.Version, gvr.Resource)
+	}
+
+	// 1. Prefer Table request: extracts display status column and PartialObjectMetadata without spec payload
+	var table metav1.Table
+	err := cs.RESTClient().Get().
+		AbsPath(path).
+		SetHeader("Accept", "application/json;as=Table;v=v1;g=meta.k8s.io,application/json;as=Table;v=v1beta1;g=meta.k8s.io").
+		VersionedParams(&metav1.ListOptions{Limit: limit}, metav1.ParameterCodec).
+		Do(ctx).
+		Into(&table)
+	if err == nil && len(table.Rows) > 0 {
+		nameCol := -1
+		statusCol := -1
+		for idx, col := range table.ColumnDefinitions {
+			cName := strings.ToLower(col.Name)
+			if cName == "name" {
+				nameCol = idx
+			} else if statusCol == -1 && (cName == "status" || cName == "phase" || cName == "state" || cName == "ready") {
+				statusCol = idx
+			}
+		}
+
+		items := make([]crdResourceInfo, 0, len(table.Rows))
+		for _, row := range table.Rows {
+			var meta metav1.PartialObjectMetadata
+			if len(row.Object.Raw) > 0 {
+				_ = json.Unmarshal(row.Object.Raw, &meta)
+			}
+			name := meta.Name
+			if name == "" && nameCol >= 0 && nameCol < len(row.Cells) {
+				name = fmt.Sprintf("%v", row.Cells[nameCol])
+			}
+			if name == "" {
+				continue
+			}
+			itemNs := meta.Namespace
+			if itemNs == "" && ns != "" && res.Namespaced {
+				itemNs = ns
+			}
+
+			statusStr := "Ready"
+			if statusCol >= 0 && statusCol < len(row.Cells) {
+				if sVal := fmt.Sprintf("%v", row.Cells[statusCol]); sVal != "" && sVal != "<nil>" {
+					statusStr = sVal
+				}
+			}
+
+			items = append(items, crdResourceInfo{
+				Name:       name,
+				Namespace:  itemNs,
+				Kind:       res.Kind,
+				Display:    statusStr,
+				Meta:       fmt.Sprintf("%s/%s", gv.Group, gv.Version),
+				Age:        ageString(meta.CreationTimestamp),
+				AgeSeconds: ageSeconds(meta.CreationTimestamp),
+			})
+		}
+		sort.Slice(items, func(i, j int) bool { return items[i].Name < items[j].Name })
+		return items
+	}
+
+	// 2. Safe fallback: metadata-only client. Retrieves ONLY PartialObjectMetadata (Name, Namespace, Age).
+	// Under NO circumstances does it download full objects, specs, or arbitrary fields.
+	if metaClient != nil {
+		var mList *metav1.PartialObjectMetadataList
+		if res.Namespaced && ns != "" {
+			mList, err = metaClient.Resource(gvr).Namespace(ns).List(ctx, metav1.ListOptions{Limit: limit})
+		} else {
+			mList, err = metaClient.Resource(gvr).List(ctx, metav1.ListOptions{Limit: limit})
+		}
+		if err == nil && len(mList.Items) > 0 {
+			items := make([]crdResourceInfo, 0, len(mList.Items))
+			for i := range mList.Items {
+				item := &mList.Items[i]
 				items = append(items, crdResourceInfo{
-					Name:      item.Metadata.Name,
-					Namespace: item.Metadata.Namespace,
-					Kind:      res.Kind,
-					Display:   statusStr,
-					Meta:      fmt.Sprintf("%s/%s", gv.Group, gv.Version),
-					Age:       ageString(item.Metadata.CreationTimestamp),
-					AgeSeconds: ageSeconds(item.Metadata.CreationTimestamp),
+					Name:       item.Name,
+					Namespace:  item.Namespace,
+					Kind:       res.Kind,
+					Display:    "Ready",
+					Meta:       fmt.Sprintf("%s/%s", gv.Group, gv.Version),
+					Age:        ageString(item.CreationTimestamp),
+					AgeSeconds: ageSeconds(item.CreationTimestamp),
 				})
 			}
 			sort.Slice(items, func(i, j int) bool { return items[i].Name < items[j].Name })
-			result[res.Name] = items
+			return items
 		}
 	}
+
+	return nil
 }
 
 func deploymentDisplay(d *appsv1.Deployment) (string, string) {
@@ -653,8 +755,8 @@ func fetchSecretsMetadata(ctx context.Context, cs *kubernetes.Clientset, cfg *re
 }
 
 // fetchConfigMaps lists configmaps, preferring a Table request to avoid fetching large config payloads.
-// Falls back to bounded standard List if Table is unavailable.
-func fetchConfigMaps(ctx context.Context, cs *kubernetes.Clientset, queryNs string, limit int64) []configMapInfo {
+// Falls back to metadata-only client to strictly avoid downloading full config data payloads.
+func fetchConfigMaps(ctx context.Context, cs *kubernetes.Clientset, cfg *rest.Config, queryNs string, limit int64) []configMapInfo {
 	var table metav1.Table
 	req := cs.CoreV1().RESTClient().Get().
 		Resource("configmaps").
@@ -719,23 +821,34 @@ func fetchConfigMaps(ctx context.Context, cs *kubernetes.Clientset, queryNs stri
 		return infos
 	}
 
-	// Fallback to standard List with strict Limit
-	if cms, err := cs.CoreV1().ConfigMaps(queryNs).List(ctx, metav1.ListOptions{Limit: limit}); err == nil && len(cms.Items) > 0 {
-		infos := make([]configMapInfo, 0, len(cms.Items))
-		for i := range cms.Items {
-			cm := &cms.Items[i]
-			infos = append(infos, configMapInfo{
-				Name:       cm.Name,
-				Namespace:  cm.Namespace,
-				Display:    fmt.Sprintf("%d keys", len(cm.Data)),
-				Kind:       "running",
-				DataCount:  len(cm.Data),
-				Age:        ageString(cm.CreationTimestamp),
-				AgeSeconds: ageSeconds(cm.CreationTimestamp),
-			})
+	// Safe fallback: metadata-only client. Never downloads full ConfigMap data payloads.
+	if cfg != nil {
+		if metaClient, mErr := metadata.NewForConfig(cfg); mErr == nil {
+			gvr := schema.GroupVersionResource{Group: "", Version: "v1", Resource: "configmaps"}
+			var mList *metav1.PartialObjectMetadataList
+			if queryNs != "" {
+				mList, err = metaClient.Resource(gvr).Namespace(queryNs).List(ctx, metav1.ListOptions{Limit: limit})
+			} else {
+				mList, err = metaClient.Resource(gvr).List(ctx, metav1.ListOptions{Limit: limit})
+			}
+			if err == nil && len(mList.Items) > 0 {
+				infos := make([]configMapInfo, 0, len(mList.Items))
+				for i := range mList.Items {
+					m := &mList.Items[i]
+					infos = append(infos, configMapInfo{
+						Name:       m.Name,
+						Namespace:  m.Namespace,
+						Display:    "ConfigMap",
+						Kind:       "running",
+						DataCount:  0,
+						Age:        ageString(m.CreationTimestamp),
+						AgeSeconds: ageSeconds(m.CreationTimestamp),
+					})
+				}
+				sort.Slice(infos, func(i, j int) bool { return infos[i].Name < infos[j].Name })
+				return infos
+			}
 		}
-		sort.Slice(infos, func(i, j int) bool { return infos[i].Name < infos[j].Name })
-		return infos
 	}
 	return nil
 }

@@ -49,13 +49,13 @@ func TestFetchSecretsMetadata(t *testing.T) {
 }
 
 func TestFetchConfigMaps(t *testing.T) {
-	_, cs, _, err := dynamicClientFor("k3d-dev-cluster", "", 10)
+	_, cs, cfg, err := dynamicClientFor("k3d-dev-cluster", "", 10)
 	if err != nil || cs == nil {
 		t.Skip("skipping live cluster test: k3d-dev-cluster not available")
 	}
 
 	ctx := context.Background()
-	cms := fetchConfigMaps(ctx, cs, "kube-system", defaultListLimit)
+	cms := fetchConfigMaps(ctx, cs, cfg, "kube-system", defaultListLimit)
 	if len(cms) == 0 {
 		t.Fatalf("expected configmaps in kube-system, got none")
 	}
@@ -99,5 +99,36 @@ func TestPortForwardValidation(t *testing.T) {
 	err = runPortForward("k3d-dev-cluster", "", "default", "service", "mysvc", 99999, 8080, 5)
 	if err == nil || !strings.Contains(err.Error(), "invalid local port") {
 		t.Errorf("expected invalid local port error for 99999, got: %v", err)
+	}
+}
+
+func TestQueryCustomResourcesMetadataOnly(t *testing.T) {
+	_, cs, cfg, err := dynamicClientFor("k3d-dev-cluster", "", 10)
+	if err != nil || cs == nil {
+		t.Skip("skipping live cluster test: k3d-dev-cluster not available")
+	}
+
+	result := make(map[string]any)
+	queryCustomResources(context.Background(), cs, cfg, "kube-system", result)
+
+	addons, ok := result["addons"]
+	if !ok {
+		t.Fatalf("expected addons CRD in result, got: %v", result)
+	}
+	addonList, ok := addons.([]crdResourceInfo)
+	if !ok || len(addonList) == 0 {
+		t.Fatalf("expected non-empty crdResourceInfo slice for addons, got: %v", addons)
+	}
+
+	for _, it := range addonList {
+		if it.Name == "" {
+			t.Errorf("expected non-empty addon name")
+		}
+		if it.Namespace != "kube-system" {
+			t.Errorf("expected kube-system namespace, got %q", it.Namespace)
+		}
+		if it.Display == "" {
+			t.Errorf("expected non-empty display for addon %q", it.Name)
+		}
 	}
 }
