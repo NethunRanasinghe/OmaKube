@@ -4,6 +4,9 @@
 package main
 
 import (
+	"fmt"
+	"io"
+	"net/http"
 	"os"
 
 	"k8s.io/cli-runtime/pkg/genericclioptions"
@@ -38,6 +41,9 @@ const (
 	// maxResponseBytes bounds the incoming HTTP stream read during Table decoding,
 	// preventing cluster-controlled memory exhaustion while receiving/decoding each response.
 	maxResponseBytes = 2 << 20 // 2 MiB
+	// Typed client-go reads also receive full objects. Bound their response bodies
+	// before client-go buffers and decodes them, regardless of ListOptions.Limit.
+	maxKubeResponseBytes = 8 << 20 // 8 MiB
 
 	// maxDisplayStringLen bounds server-controlled status/display strings retained in memory or JSON.
 	maxDisplayStringLen = 64
@@ -75,7 +81,54 @@ func restConfigFor(raw clientcmdapi.Config, contextName string, timeoutSec int) 
 	if timeoutSec > 0 {
 		cfg.Timeout = secondsToDuration(timeoutSec)
 	}
+	previousWrap := cfg.WrapTransport
+	cfg.WrapTransport = func(rt http.RoundTripper) http.RoundTripper {
+		if previousWrap != nil {
+			rt = previousWrap(rt)
+		}
+		return boundedTransport{rt: rt}
+	}
 	return cfg, nil
+}
+
+type boundedTransport struct{ rt http.RoundTripper }
+
+func (t boundedTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	resp, err := t.rt.RoundTrip(req)
+	if err != nil {
+		return resp, err
+	}
+	// SPDY port-forward upgrades hand the response body to the connection
+	// upgrader, which needs the original bidirectional stream.
+	if resp.StatusCode != http.StatusSwitchingProtocols && resp.Body != nil {
+		resp.Body = &boundedBody{ReadCloser: resp.Body, remaining: maxKubeResponseBytes}
+	}
+	return resp, nil
+}
+
+type boundedBody struct {
+	io.ReadCloser
+	remaining int64
+}
+
+func (b *boundedBody) Read(p []byte) (int, error) {
+	if len(p) == 0 {
+		return 0, nil
+	}
+	if b.remaining == 0 {
+		var probe [1]byte
+		if n, err := b.ReadCloser.Read(probe[:]); n > 0 {
+			return 0, fmt.Errorf("Kubernetes response exceeds %d bytes", maxKubeResponseBytes)
+		} else {
+			return 0, err
+		}
+	}
+	if int64(len(p)) > b.remaining {
+		p = p[:int(b.remaining)]
+	}
+	n, err := b.ReadCloser.Read(p)
+	b.remaining -= int64(n)
+	return n, err
 }
 
 func kubeconfigPathForWrite(override string) (string, error) {
