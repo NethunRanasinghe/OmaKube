@@ -17,7 +17,6 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/client-go/kubernetes"
-	"k8s.io/client-go/metadata"
 	"k8s.io/client-go/rest"
 )
 
@@ -140,7 +139,7 @@ func runWorkloads(contextName, override, namespace string, timeoutSec int) error
 		queryNs = ""
 	}
 
-	_, cs, cfg, err := dynamicClientFor(ctxName, override, timeoutSec)
+	_, cs, _, err := dynamicClientFor(ctxName, override, timeoutSec)
 	if err != nil {
 		return err
 	}
@@ -345,13 +344,13 @@ func runWorkloads(contextName, override, namespace string, timeoutSec int) error
 	}
 
 	// 8. ConfigMaps: Table query avoids retrieving large data payloads into memory.
-	if cms := fetchConfigMaps(ctx, cs, cfg, queryNs, defaultListLimit); len(cms) > 0 {
+	if cms := fetchConfigMaps(ctx, cs, queryNs, defaultListLimit); len(cms) > 0 {
 		result["configmaps"] = cms
 	}
 
 	// 9. Secrets: Table query retrieves metadata, type, and key count WITHOUT fetching or decoding
 	// sensitive credential values (.Data or .StringData) across the network or into memory.
-	if secs := fetchSecretsMetadata(ctx, cs, cfg, queryNs, defaultListLimit); len(secs) > 0 {
+	if secs := fetchSecretsMetadata(ctx, cs, queryNs, defaultListLimit); len(secs) > 0 {
 		result["secrets"] = secs
 	}
 
@@ -384,7 +383,7 @@ func runWorkloads(contextName, override, namespace string, timeoutSec int) error
 	}
 
 	// 11. Dynamic Custom Resource Discovery (CRDs) — metadata-only/Table queries with strict bounds.
-	queryCustomResources(ctx, cs, cfg, queryNs, result)
+	queryCustomResources(ctx, cs, queryNs, result)
 
 	raw, err := json.Marshal(result)
 	if err != nil {
@@ -397,16 +396,14 @@ func runWorkloads(contextName, override, namespace string, timeoutSec int) error
 // queryCustomResources discovers Custom Resource Definitions (CRDs) available on the cluster
 // and queries items concurrently using metadata-only/Table requests.
 // It never downloads full objects, spec definitions, or sensitive credentials.
-func queryCustomResources(ctx context.Context, cs *kubernetes.Clientset, cfg *rest.Config, ns string, result map[string]any) {
-	if cs == nil || cfg == nil {
+func queryCustomResources(ctx context.Context, cs *kubernetes.Clientset, ns string, result map[string]any) {
+	if cs == nil {
 		return
 	}
 	lists, err := cs.Discovery().ServerPreferredResources()
 	if err != nil && len(lists) == 0 {
 		return
 	}
-
-	metaClient, _ := metadata.NewForConfig(cfg)
 
 	knownGroups := map[string]bool{
 		"":                             true,
@@ -538,7 +535,7 @@ func queryCustomResources(ctx context.Context, cs *kubernetes.Clientset, cfg *re
 					limit = int64(remainingCap)
 				}
 
-				items := fetchCRDItems(ctx, cs, metaClient, target.gvr, target.gv, target.res, ns, limit)
+				items := fetchCRDItems(ctx, cs, target.gvr, target.gv, target.res, ns, limit)
 				if len(items) > 0 {
 					mu.Lock()
 					if totalRetained < maxTotalCRDItems {
@@ -567,6 +564,17 @@ func decodeTableWithLimit(req *rest.Request, ctx context.Context, table *metav1.
 	return json.NewDecoder(io.LimitReader(stream, maxBytes)).Decode(table)
 }
 
+// decodeMetadataWithLimit reads the HTTP response stream wrapped in an io.LimitReader,
+// preventing cluster-controlled memory exhaustion while receiving/decoding metadata fallback responses.
+func decodeMetadataWithLimit(req *rest.Request, ctx context.Context, mList *metav1.PartialObjectMetadataList, maxBytes int64) error {
+	stream, err := req.Stream(ctx)
+	if err != nil {
+		return err
+	}
+	defer stream.Close()
+	return json.NewDecoder(io.LimitReader(stream, maxBytes)).Decode(mList)
+}
+
 // sanitizeDisplayString restricts arbitrary server-provided strings to a safe length,
 // preventing memory exhaustion and output bloat from oversized printer columns or metadata.
 func sanitizeDisplayString(val string, maxLen int) string {
@@ -582,8 +590,8 @@ func sanitizeDisplayString(val string, maxLen int) string {
 }
 
 // fetchCRDItems retrieves items for a custom resource using Table or PartialObjectMetadata.
-// It never fetches full objects, spec definitions, or sensitive credentials.
-func fetchCRDItems(ctx context.Context, cs *kubernetes.Clientset, metaClient metadata.Interface, gvr schema.GroupVersionResource, gv schema.GroupVersion, res metav1.APIResource, ns string, limit int64) []crdResourceInfo {
+// It never fetches full objects, spec definitions, or sensitive credentials, and bounds all streams.
+func fetchCRDItems(ctx context.Context, cs *kubernetes.Clientset, gvr schema.GroupVersionResource, gv schema.GroupVersion, res metav1.APIResource, ns string, limit int64) []crdResourceInfo {
 	var path string
 	if res.Namespaced && ns != "" {
 		path = fmt.Sprintf("/apis/%s/%s/namespaces/%s/%s", gvr.Group, gvr.Version, ns, gvr.Resource)
@@ -653,32 +661,31 @@ func fetchCRDItems(ctx context.Context, cs *kubernetes.Clientset, metaClient met
 		return items
 	}
 
-	// 2. Safe fallback: metadata-only client. Retrieves ONLY PartialObjectMetadata (Name, Namespace, Age).
-	// Under NO circumstances does it download full objects, specs, or arbitrary fields.
-	if metaClient != nil {
-		var mList *metav1.PartialObjectMetadataList
-		if res.Namespaced && ns != "" {
-			mList, err = metaClient.Resource(gvr).Namespace(ns).List(ctx, metav1.ListOptions{Limit: limit})
-		} else {
-			mList, err = metaClient.Resource(gvr).List(ctx, metav1.ListOptions{Limit: limit})
+	// 2. Safe fallback: metadata-only request streamed with strict byte ceiling.
+	// Retrieves ONLY PartialObjectMetadata (Name, Namespace, Age) with maxResponseBytes ceiling.
+	metaReq := cs.RESTClient().Get().
+		AbsPath(path).
+		SetHeader("Accept", "application/json;as=PartialObjectMetadataList;g=meta.k8s.io;v=v1,application/json")
+	opts = metav1.ListOptions{Limit: limit}
+	metaReq.VersionedParams(&opts, metav1.ParameterCodec)
+
+	var mList metav1.PartialObjectMetadataList
+	if mErr := decodeMetadataWithLimit(metaReq, ctx, &mList, maxResponseBytes); mErr == nil && len(mList.Items) > 0 {
+		items := make([]crdResourceInfo, 0, len(mList.Items))
+		for i := range mList.Items {
+			item := &mList.Items[i]
+			items = append(items, crdResourceInfo{
+				Name:       sanitizeDisplayString(item.Name, 120),
+				Namespace:  sanitizeDisplayString(item.Namespace, 64),
+				Kind:       sanitizeDisplayString(res.Kind, 64),
+				Display:    "Ready",
+				Meta:       fmt.Sprintf("%s/%s", gv.Group, gv.Version),
+				Age:        ageString(item.CreationTimestamp),
+				AgeSeconds: ageSeconds(item.CreationTimestamp),
+			})
 		}
-		if err == nil && len(mList.Items) > 0 {
-			items := make([]crdResourceInfo, 0, len(mList.Items))
-			for i := range mList.Items {
-				item := &mList.Items[i]
-				items = append(items, crdResourceInfo{
-					Name:       sanitizeDisplayString(item.Name, 120),
-					Namespace:  sanitizeDisplayString(item.Namespace, 64),
-					Kind:       sanitizeDisplayString(res.Kind, 64),
-					Display:    "Ready",
-					Meta:       fmt.Sprintf("%s/%s", gv.Group, gv.Version),
-					Age:        ageString(item.CreationTimestamp),
-					AgeSeconds: ageSeconds(item.CreationTimestamp),
-				})
-			}
-			sort.Slice(items, func(i, j int) bool { return items[i].Name < items[j].Name })
-			return items
-		}
+		sort.Slice(items, func(i, j int) bool { return items[i].Name < items[j].Name })
+		return items
 	}
 
 	return nil
@@ -703,7 +710,7 @@ func deploymentDisplay(d *appsv1.Deployment) (string, string) {
 // WITHOUT fetching or decoding sensitive Secret payload/credential values (.Data, .StringData).
 // The API server converts the secret into table rows containing only display columns,
 // completely avoiding credential transmission and unnecessary memory allocation.
-func fetchSecretsMetadata(ctx context.Context, cs *kubernetes.Clientset, cfg *rest.Config, queryNs string, limit int64) []secretInfo {
+func fetchSecretsMetadata(ctx context.Context, cs *kubernetes.Clientset, queryNs string, limit int64) []secretInfo {
 	var table metav1.Table
 	req := cs.CoreV1().RESTClient().Get().
 		Resource("secrets").
@@ -782,35 +789,34 @@ func fetchSecretsMetadata(ctx context.Context, cs *kubernetes.Clientset, cfg *re
 		return infos
 	}
 
-	// Safe fallback: metadata-only client. Never downloads or decodes Secret .Data or credentials.
-	if cfg != nil {
-		if metaClient, mErr := metadata.NewForConfig(cfg); mErr == nil {
-			gvr := schema.GroupVersionResource{Group: "", Version: "v1", Resource: "secrets"}
-			var mList *metav1.PartialObjectMetadataList
-			if queryNs != "" {
-				mList, err = metaClient.Resource(gvr).Namespace(queryNs).List(ctx, metav1.ListOptions{Limit: limit})
-			} else {
-				mList, err = metaClient.Resource(gvr).List(ctx, metav1.ListOptions{Limit: limit})
-			}
-			if err == nil && len(mList.Items) > 0 {
-				infos := make([]secretInfo, 0, len(mList.Items))
-				for i := range mList.Items {
-					m := &mList.Items[i]
-					infos = append(infos, secretInfo{
-						Name:       m.Name,
-						Namespace:  m.Namespace,
-						Display:    "Secret",
-						Kind:       "running",
-						Type:       "Secret",
-						DataCount:  0,
-						Age:        ageString(m.CreationTimestamp),
-						AgeSeconds: ageSeconds(m.CreationTimestamp),
-					})
-				}
-				sort.Slice(infos, func(i, j int) bool { return infos[i].Name < infos[j].Name })
-				return infos
-			}
+	// Safe fallback: metadata-only request streamed with strict byte ceiling.
+	metaReq := cs.CoreV1().RESTClient().Get().
+		Resource("secrets").
+		SetHeader("Accept", "application/json;as=PartialObjectMetadataList;g=meta.k8s.io;v=v1,application/json")
+	if queryNs != "" {
+		metaReq = metaReq.Namespace(queryNs)
+	}
+	opts = metav1.ListOptions{Limit: limit}
+	metaReq.VersionedParams(&opts, metav1.ParameterCodec)
+
+	var mList metav1.PartialObjectMetadataList
+	if mErr := decodeMetadataWithLimit(metaReq, ctx, &mList, maxResponseBytes); mErr == nil && len(mList.Items) > 0 {
+		infos := make([]secretInfo, 0, len(mList.Items))
+		for i := range mList.Items {
+			m := &mList.Items[i]
+			infos = append(infos, secretInfo{
+				Name:       sanitizeDisplayString(m.Name, 120),
+				Namespace:  sanitizeDisplayString(m.Namespace, 64),
+				Display:    "Secret",
+				Kind:       "running",
+				Type:       "Secret",
+				DataCount:  0,
+				Age:        ageString(m.CreationTimestamp),
+				AgeSeconds: ageSeconds(m.CreationTimestamp),
+			})
 		}
+		sort.Slice(infos, func(i, j int) bool { return infos[i].Name < infos[j].Name })
+		return infos
 	}
 
 	return nil
@@ -818,7 +824,7 @@ func fetchSecretsMetadata(ctx context.Context, cs *kubernetes.Clientset, cfg *re
 
 // fetchConfigMaps lists configmaps, preferring a Table request to avoid fetching large config payloads.
 // Falls back to metadata-only client to strictly avoid downloading full config data payloads.
-func fetchConfigMaps(ctx context.Context, cs *kubernetes.Clientset, cfg *rest.Config, queryNs string, limit int64) []configMapInfo {
+func fetchConfigMaps(ctx context.Context, cs *kubernetes.Clientset, queryNs string, limit int64) []configMapInfo {
 	var table metav1.Table
 	req := cs.CoreV1().RESTClient().Get().
 		Resource("configmaps").
@@ -886,34 +892,33 @@ func fetchConfigMaps(ctx context.Context, cs *kubernetes.Clientset, cfg *rest.Co
 		return infos
 	}
 
-	// Safe fallback: metadata-only client. Never downloads full ConfigMap data payloads.
-	if cfg != nil {
-		if metaClient, mErr := metadata.NewForConfig(cfg); mErr == nil {
-			gvr := schema.GroupVersionResource{Group: "", Version: "v1", Resource: "configmaps"}
-			var mList *metav1.PartialObjectMetadataList
-			if queryNs != "" {
-				mList, err = metaClient.Resource(gvr).Namespace(queryNs).List(ctx, metav1.ListOptions{Limit: limit})
-			} else {
-				mList, err = metaClient.Resource(gvr).List(ctx, metav1.ListOptions{Limit: limit})
-			}
-			if err == nil && len(mList.Items) > 0 {
-				infos := make([]configMapInfo, 0, len(mList.Items))
-				for i := range mList.Items {
-					m := &mList.Items[i]
-					infos = append(infos, configMapInfo{
-						Name:       m.Name,
-						Namespace:  m.Namespace,
-						Display:    "ConfigMap",
-						Kind:       "running",
-						DataCount:  0,
-						Age:        ageString(m.CreationTimestamp),
-						AgeSeconds: ageSeconds(m.CreationTimestamp),
-					})
-				}
-				sort.Slice(infos, func(i, j int) bool { return infos[i].Name < infos[j].Name })
-				return infos
-			}
+	// Safe fallback: metadata-only request streamed with strict byte ceiling.
+	metaReq := cs.CoreV1().RESTClient().Get().
+		Resource("configmaps").
+		SetHeader("Accept", "application/json;as=PartialObjectMetadataList;g=meta.k8s.io;v=v1,application/json")
+	if queryNs != "" {
+		metaReq = metaReq.Namespace(queryNs)
+	}
+	opts = metav1.ListOptions{Limit: limit}
+	metaReq.VersionedParams(&opts, metav1.ParameterCodec)
+
+	var mList metav1.PartialObjectMetadataList
+	if mErr := decodeMetadataWithLimit(metaReq, ctx, &mList, maxResponseBytes); mErr == nil && len(mList.Items) > 0 {
+		infos := make([]configMapInfo, 0, len(mList.Items))
+		for i := range mList.Items {
+			m := &mList.Items[i]
+			infos = append(infos, configMapInfo{
+				Name:       sanitizeDisplayString(m.Name, 120),
+				Namespace:  sanitizeDisplayString(m.Namespace, 64),
+				Display:    "ConfigMap",
+				Kind:       "running",
+				DataCount:  0,
+				Age:        ageString(m.CreationTimestamp),
+				AgeSeconds: ageSeconds(m.CreationTimestamp),
+			})
 		}
+		sort.Slice(infos, func(i, j int) bool { return infos[i].Name < infos[j].Name })
+		return infos
 	}
 	return nil
 }

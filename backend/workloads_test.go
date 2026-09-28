@@ -7,14 +7,13 @@ import (
 )
 
 func TestFetchSecretsMetadata(t *testing.T) {
-	dyn, cs, cfg, err := dynamicClientFor("k3d-dev-cluster", "", 10)
+	_, cs, _, err := dynamicClientFor("k3d-dev-cluster", "", 10)
 	if err != nil || cs == nil {
 		t.Skip("skipping live cluster test: k3d-dev-cluster not available")
 	}
-	_ = dyn
 
 	ctx := context.Background()
-	secs := fetchSecretsMetadata(ctx, cs, cfg, "kube-system", defaultListLimit)
+	secs := fetchSecretsMetadata(ctx, cs, "kube-system", defaultListLimit)
 	if len(secs) == 0 {
 		t.Fatalf("expected secrets in kube-system, got none")
 	}
@@ -49,13 +48,13 @@ func TestFetchSecretsMetadata(t *testing.T) {
 }
 
 func TestFetchConfigMaps(t *testing.T) {
-	_, cs, cfg, err := dynamicClientFor("k3d-dev-cluster", "", 10)
+	_, cs, _, err := dynamicClientFor("k3d-dev-cluster", "", 10)
 	if err != nil || cs == nil {
 		t.Skip("skipping live cluster test: k3d-dev-cluster not available")
 	}
 
 	ctx := context.Background()
-	cms := fetchConfigMaps(ctx, cs, cfg, "kube-system", defaultListLimit)
+	cms := fetchConfigMaps(ctx, cs, "kube-system", defaultListLimit)
 	if len(cms) == 0 {
 		t.Fatalf("expected configmaps in kube-system, got none")
 	}
@@ -103,13 +102,13 @@ func TestPortForwardValidation(t *testing.T) {
 }
 
 func TestQueryCustomResourcesMetadataOnly(t *testing.T) {
-	_, cs, cfg, err := dynamicClientFor("k3d-dev-cluster", "", 10)
+	_, cs, _, err := dynamicClientFor("k3d-dev-cluster", "", 10)
 	if err != nil || cs == nil {
 		t.Skip("skipping live cluster test: k3d-dev-cluster not available")
 	}
 
 	result := make(map[string]any)
-	queryCustomResources(context.Background(), cs, cfg, "kube-system", result)
+	queryCustomResources(context.Background(), cs, "kube-system", result)
 
 	addons, ok := result["addons"]
 	if !ok {
