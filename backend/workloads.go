@@ -555,24 +555,38 @@ func queryCustomResources(ctx context.Context, cs *kubernetes.Clientset, ns stri
 
 // decodeTableWithLimit reads the HTTP response stream wrapped in an io.LimitReader,
 // preventing cluster-controlled memory exhaustion while receiving/decoding each response.
+// It verifies that the server responded with a Table object, rejecting full resource payloads.
 func decodeTableWithLimit(req *rest.Request, ctx context.Context, table *metav1.Table, maxBytes int64) error {
 	stream, err := req.Stream(ctx)
 	if err != nil {
 		return err
 	}
 	defer stream.Close()
-	return json.NewDecoder(io.LimitReader(stream, maxBytes)).Decode(table)
+	if err := json.NewDecoder(io.LimitReader(stream, maxBytes)).Decode(table); err != nil {
+		return err
+	}
+	if table.Kind != "" && table.Kind != "Table" {
+		return fmt.Errorf("unexpected object kind %q, expected Table", table.Kind)
+	}
+	return nil
 }
 
 // decodeMetadataWithLimit reads the HTTP response stream wrapped in an io.LimitReader,
 // preventing cluster-controlled memory exhaustion while receiving/decoding metadata fallback responses.
+// It verifies that the server responded with a PartialObjectMetadataList, rejecting full resource payloads.
 func decodeMetadataWithLimit(req *rest.Request, ctx context.Context, mList *metav1.PartialObjectMetadataList, maxBytes int64) error {
 	stream, err := req.Stream(ctx)
 	if err != nil {
 		return err
 	}
 	defer stream.Close()
-	return json.NewDecoder(io.LimitReader(stream, maxBytes)).Decode(mList)
+	if err := json.NewDecoder(io.LimitReader(stream, maxBytes)).Decode(mList); err != nil {
+		return err
+	}
+	if mList.Kind != "" && mList.Kind != "PartialObjectMetadataList" {
+		return fmt.Errorf("unexpected object kind %q, expected PartialObjectMetadataList", mList.Kind)
+	}
+	return nil
 }
 
 // sanitizeDisplayString restricts arbitrary server-provided strings to a safe length,
@@ -665,7 +679,7 @@ func fetchCRDItems(ctx context.Context, cs *kubernetes.Clientset, gvr schema.Gro
 	// Retrieves ONLY PartialObjectMetadata (Name, Namespace, Age) with maxResponseBytes ceiling.
 	metaReq := cs.RESTClient().Get().
 		AbsPath(path).
-		SetHeader("Accept", "application/json;as=PartialObjectMetadataList;g=meta.k8s.io;v=v1,application/json")
+		SetHeader("Accept", "application/json;as=PartialObjectMetadataList;g=meta.k8s.io;v=v1,application/json;as=PartialObjectMetadataList;g=meta.k8s.io;v=v1beta1")
 	opts = metav1.ListOptions{Limit: limit}
 	metaReq.VersionedParams(&opts, metav1.ParameterCodec)
 
@@ -792,7 +806,7 @@ func fetchSecretsMetadata(ctx context.Context, cs *kubernetes.Clientset, queryNs
 	// Safe fallback: metadata-only request streamed with strict byte ceiling.
 	metaReq := cs.CoreV1().RESTClient().Get().
 		Resource("secrets").
-		SetHeader("Accept", "application/json;as=PartialObjectMetadataList;g=meta.k8s.io;v=v1,application/json")
+		SetHeader("Accept", "application/json;as=PartialObjectMetadataList;g=meta.k8s.io;v=v1,application/json;as=PartialObjectMetadataList;g=meta.k8s.io;v=v1beta1")
 	if queryNs != "" {
 		metaReq = metaReq.Namespace(queryNs)
 	}
@@ -895,7 +909,7 @@ func fetchConfigMaps(ctx context.Context, cs *kubernetes.Clientset, queryNs stri
 	// Safe fallback: metadata-only request streamed with strict byte ceiling.
 	metaReq := cs.CoreV1().RESTClient().Get().
 		Resource("configmaps").
-		SetHeader("Accept", "application/json;as=PartialObjectMetadataList;g=meta.k8s.io;v=v1,application/json")
+		SetHeader("Accept", "application/json;as=PartialObjectMetadataList;g=meta.k8s.io;v=v1,application/json;as=PartialObjectMetadataList;g=meta.k8s.io;v=v1beta1")
 	if queryNs != "" {
 		metaReq = metaReq.Namespace(queryNs)
 	}

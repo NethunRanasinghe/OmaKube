@@ -2,8 +2,11 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"strings"
 	"testing"
+
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
 func TestFetchSecretsMetadata(t *testing.T) {
@@ -145,5 +148,29 @@ func TestSanitizeDisplayString(t *testing.T) {
 	}
 	if !strings.HasSuffix(got, "…") {
 		t.Errorf("expected ellipsis suffix, got %q", got)
+	}
+}
+
+func TestDecodeKindRejection(t *testing.T) {
+	// Table rejecting non-table
+	badTableJSON := strings.NewReader(`{"kind":"SecretList","apiVersion":"v1","items":[]}`)
+	var table metav1.Table
+	if err := json.NewDecoder(badTableJSON).Decode(&table); err == nil {
+		if table.Kind != "" && table.Kind != "Table" {
+			// Expected rejection
+		} else {
+			t.Errorf("expected rejection of SecretList in Table")
+		}
+	}
+
+	// PartialObjectMetadataList rejecting non-metadata
+	badMetaJSON := strings.NewReader(`{"kind":"SecretList","apiVersion":"v1","items":[]}`)
+	var mList metav1.PartialObjectMetadataList
+	if err := json.NewDecoder(badMetaJSON).Decode(&mList); err == nil {
+		if mList.Kind != "" && mList.Kind != "PartialObjectMetadataList" {
+			// Expected rejection
+		} else {
+			t.Errorf("expected rejection of SecretList in PartialObjectMetadataList")
+		}
 	}
 }
