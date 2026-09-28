@@ -519,10 +519,18 @@ Item {
     }
   }
 
+  function resolveExportDir(dir) {
+    var raw = String(dir || setting("logExportDir", "") || (Quickshell.env("HOME") + "/omakube-logs")).trim()
+    if (raw === "") raw = (Quickshell.env("HOME") || "") + "/omakube-logs"
+    if (raw.indexOf("~/") === 0) raw = (Quickshell.env("HOME") || "") + raw.slice(1)
+    return raw
+  }
+
   function exportLogs(dir) {
     if (exProcess.running || logPod === "") return
     var stamp = Qt.formatDateTime(new Date(), "yyyyMMdd-hhmmss")
-    var target = (dir !== "" ? dir : Quickshell.env("HOME") + "/omakube-logs")
+    var baseDir = resolveExportDir(dir)
+    var target = baseDir
       + "/omakube-" + activeContextName + "-" + activeNamespace + "-" + logPod
       + (logContainer !== "" ? "-" + logContainer : "") + "-" + stamp + ".txt"
     actionStatus = "Exporting logs…"
@@ -854,15 +862,30 @@ Item {
   }
 
   Process {
+    id: mkdirProcess
+    running: false
+    command: []
+    property string targetDir: ""
+    onExited: function(exitCode) {
+      if (exitCode === 0 && targetDir !== "") {
+        openDirProcess.command = ["xdg-open", targetDir]
+        openDirProcess.running = true
+      }
+      targetDir = ""
+    }
+  }
+
+  Process {
     id: openDirProcess
     running: false
     command: []
   }
 
   function openExportDir(dir) {
-    var d = String(dir || setting("logExportDir", "") || (Quickshell.env("HOME") + "/omakube-logs")).trim()
-    openDirProcess.command = ["sh", "-c", "mkdir -p \"" + d + "\" && (xdg-open \"" + d + "\" || nautilus \"" + d + "\" || dolphin \"" + d + "\" || thunar \"" + d + "\")"]
-    openDirProcess.running = true
+    var targetDir = resolveExportDir(dir)
+    mkdirProcess.targetDir = targetDir
+    mkdirProcess.command = ["mkdir", "-p", targetDir]
+    mkdirProcess.running = true
   }
 
   Timer {
