@@ -2,6 +2,10 @@
 
 **OmaKube** is an ultra-dense, keyboard-driven Kubernetes popup widget designed for the [Omarchy](https://omarchy.org/) desktop shell. It bridges the gap between lightweight status-bar widgets and full-featured desktop dashboards, scaling from single-node development clusters (`k3s`, `minikube`) to multi-tenant enterprise clusters with hundreds of namespaces, thousands of pods, and custom resource definitions (CRDs).
 
+<p align="center">
+  <img src="preview.png" alt="OmaKube Control Deck Preview" width="520">
+</p>
+
 ---
 
 ## Highlights & Scalable Architecture
@@ -62,6 +66,7 @@ The backend Go CLI (`bin/omakube`) uses `client-go` and `DiscoveryClient.ServerP
 ├── LICENSE             # MIT License
 ├── Makefile            # Build recipe to compile backend from source
 ├── README.md           # Documentation & usage guide
+├── preview.png         # Marketplace & README preview asset
 ├── Panel.qml           # Primary UI entry point (bar pill + popup + popovers)
 ├── Service.qml         # Asynchronous data owner & process supervisor
 ├── Model.js            # Pure functional helpers, status mappings, and log styling
