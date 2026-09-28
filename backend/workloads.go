@@ -7,6 +7,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"sort"
 	"strings"
 	"sync"
@@ -555,6 +556,31 @@ func queryCustomResources(ctx context.Context, cs *kubernetes.Clientset, cfg *re
 	wg.Wait()
 }
 
+// decodeTableWithLimit reads the HTTP response stream wrapped in an io.LimitReader,
+// preventing cluster-controlled memory exhaustion while receiving/decoding each response.
+func decodeTableWithLimit(req *rest.Request, ctx context.Context, table *metav1.Table, maxBytes int64) error {
+	stream, err := req.Stream(ctx)
+	if err != nil {
+		return err
+	}
+	defer stream.Close()
+	return json.NewDecoder(io.LimitReader(stream, maxBytes)).Decode(table)
+}
+
+// sanitizeDisplayString restricts arbitrary server-provided strings to a safe length,
+// preventing memory exhaustion and output bloat from oversized printer columns or metadata.
+func sanitizeDisplayString(val string, maxLen int) string {
+	s := strings.TrimSpace(val)
+	if len(s) > maxLen {
+		if maxLen > 3 {
+			s = s[:maxLen-3] + "…"
+		} else {
+			s = s[:maxLen]
+		}
+	}
+	return s
+}
+
 // fetchCRDItems retrieves items for a custom resource using Table or PartialObjectMetadata.
 // It never fetches full objects, spec definitions, or sensitive credentials.
 func fetchCRDItems(ctx context.Context, cs *kubernetes.Clientset, metaClient metadata.Interface, gvr schema.GroupVersionResource, gv schema.GroupVersion, res metav1.APIResource, ns string, limit int64) []crdResourceInfo {
@@ -565,14 +591,16 @@ func fetchCRDItems(ctx context.Context, cs *kubernetes.Clientset, metaClient met
 		path = fmt.Sprintf("/apis/%s/%s/%s", gvr.Group, gvr.Version, gvr.Resource)
 	}
 
-	// 1. Prefer Table request: extracts display status column and PartialObjectMetadata without spec payload
+	// 1. Prefer Table request: extracts display status column and PartialObjectMetadata without spec payload,
+	// enforcing a byte bound while receiving/decoding the response stream.
 	var table metav1.Table
-	err := cs.RESTClient().Get().
+	req := cs.RESTClient().Get().
 		AbsPath(path).
-		SetHeader("Accept", "application/json;as=Table;v=v1;g=meta.k8s.io,application/json;as=Table;v=v1beta1;g=meta.k8s.io").
-		VersionedParams(&metav1.ListOptions{Limit: limit}, metav1.ParameterCodec).
-		Do(ctx).
-		Into(&table)
+		SetHeader("Accept", "application/json;as=Table;v=v1;g=meta.k8s.io,application/json;as=Table;v=v1beta1;g=meta.k8s.io")
+	opts := metav1.ListOptions{Limit: limit}
+	req.VersionedParams(&opts, metav1.ParameterCodec)
+
+	err := decodeTableWithLimit(req, ctx, &table, maxResponseBytes)
 	if err == nil && len(table.Rows) > 0 {
 		nameCol := -1
 		statusCol := -1
@@ -595,10 +623,11 @@ func fetchCRDItems(ctx context.Context, cs *kubernetes.Clientset, metaClient met
 			if name == "" && nameCol >= 0 && nameCol < len(row.Cells) {
 				name = fmt.Sprintf("%v", row.Cells[nameCol])
 			}
+			name = sanitizeDisplayString(name, 120)
 			if name == "" {
 				continue
 			}
-			itemNs := meta.Namespace
+			itemNs := sanitizeDisplayString(meta.Namespace, 64)
 			if itemNs == "" && ns != "" && res.Namespaced {
 				itemNs = ns
 			}
@@ -606,14 +635,14 @@ func fetchCRDItems(ctx context.Context, cs *kubernetes.Clientset, metaClient met
 			statusStr := "Ready"
 			if statusCol >= 0 && statusCol < len(row.Cells) {
 				if sVal := fmt.Sprintf("%v", row.Cells[statusCol]); sVal != "" && sVal != "<nil>" {
-					statusStr = sVal
+					statusStr = sanitizeDisplayString(sVal, maxDisplayStringLen)
 				}
 			}
 
 			items = append(items, crdResourceInfo{
 				Name:       name,
 				Namespace:  itemNs,
-				Kind:       res.Kind,
+				Kind:       sanitizeDisplayString(res.Kind, 64),
 				Display:    statusStr,
 				Meta:       fmt.Sprintf("%s/%s", gv.Group, gv.Version),
 				Age:        ageString(meta.CreationTimestamp),
@@ -638,9 +667,9 @@ func fetchCRDItems(ctx context.Context, cs *kubernetes.Clientset, metaClient met
 			for i := range mList.Items {
 				item := &mList.Items[i]
 				items = append(items, crdResourceInfo{
-					Name:       item.Name,
-					Namespace:  item.Namespace,
-					Kind:       res.Kind,
+					Name:       sanitizeDisplayString(item.Name, 120),
+					Namespace:  sanitizeDisplayString(item.Namespace, 64),
+					Kind:       sanitizeDisplayString(res.Kind, 64),
 					Display:    "Ready",
 					Meta:       fmt.Sprintf("%s/%s", gv.Group, gv.Version),
 					Age:        ageString(item.CreationTimestamp),
@@ -683,7 +712,9 @@ func fetchSecretsMetadata(ctx context.Context, cs *kubernetes.Clientset, cfg *re
 		req = req.Namespace(queryNs)
 	}
 	opts := metav1.ListOptions{Limit: limit}
-	err := req.VersionedParams(&opts, metav1.ParameterCodec).Do(ctx).Into(&table)
+	req.VersionedParams(&opts, metav1.ParameterCodec)
+
+	err := decodeTableWithLimit(req, ctx, &table, maxResponseBytes)
 	if err == nil && len(table.Rows) > 0 {
 		nameCol, typeCol, dataCol := -1, -1, -1
 		for idx, col := range table.ColumnDefinitions {
@@ -707,17 +738,18 @@ func fetchSecretsMetadata(ctx context.Context, cs *kubernetes.Clientset, cfg *re
 			if name == "" && nameCol >= 0 && nameCol < len(row.Cells) {
 				name = fmt.Sprintf("%v", row.Cells[nameCol])
 			}
+			name = sanitizeDisplayString(name, 120)
 			if name == "" {
 				continue
 			}
-			ns := meta.Namespace
+			ns := sanitizeDisplayString(meta.Namespace, 64)
 			if ns == "" && queryNs != "" {
 				ns = queryNs
 			}
 			secType := "Opaque"
 			if typeCol >= 0 && typeCol < len(row.Cells) {
 				if tStr := fmt.Sprintf("%v", row.Cells[typeCol]); tStr != "" && tStr != "<nil>" {
-					secType = tStr
+					secType = sanitizeDisplayString(tStr, maxDisplayStringLen)
 				}
 			}
 			dataCount := 0
@@ -795,7 +827,9 @@ func fetchConfigMaps(ctx context.Context, cs *kubernetes.Clientset, cfg *rest.Co
 		req = req.Namespace(queryNs)
 	}
 	opts := metav1.ListOptions{Limit: limit}
-	err := req.VersionedParams(&opts, metav1.ParameterCodec).Do(ctx).Into(&table)
+	req.VersionedParams(&opts, metav1.ParameterCodec)
+
+	err := decodeTableWithLimit(req, ctx, &table, maxResponseBytes)
 	if err == nil && len(table.Rows) > 0 {
 		nameCol, dataCol := -1, -1
 		for idx, col := range table.ColumnDefinitions {
@@ -817,10 +851,11 @@ func fetchConfigMaps(ctx context.Context, cs *kubernetes.Clientset, cfg *rest.Co
 			if name == "" && nameCol >= 0 && nameCol < len(row.Cells) {
 				name = fmt.Sprintf("%v", row.Cells[nameCol])
 			}
+			name = sanitizeDisplayString(name, 120)
 			if name == "" {
 				continue
 			}
-			ns := meta.Namespace
+			ns := sanitizeDisplayString(meta.Namespace, 64)
 			if ns == "" && queryNs != "" {
 				ns = queryNs
 			}

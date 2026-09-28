@@ -132,3 +132,19 @@ func TestQueryCustomResourcesMetadataOnly(t *testing.T) {
 		}
 	}
 }
+
+func TestSanitizeDisplayString(t *testing.T) {
+	short := "Ready"
+	if got := sanitizeDisplayString(short, 64); got != "Ready" {
+		t.Errorf("expected %q, got %q", short, got)
+	}
+
+	oversized := strings.Repeat("A", 200)
+	got := sanitizeDisplayString(oversized, 64)
+	if len(got) != 64 {
+		t.Errorf("expected length 64, got %d", len(got))
+	}
+	if !strings.HasSuffix(got, "…") {
+		t.Errorf("expected ellipsis suffix, got %q", got)
+	}
+}

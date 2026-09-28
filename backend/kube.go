@@ -34,6 +34,13 @@ const (
 	// maxTotalCRDItems bounds the cumulative number of custom resource items retained
 	// across all CRD types in a single refresh, preventing unbounded output size.
 	maxTotalCRDItems = 250
+
+	// maxResponseBytes bounds the incoming HTTP stream read during Table decoding,
+	// preventing cluster-controlled memory exhaustion while receiving/decoding each response.
+	maxResponseBytes = 2 << 20 // 2 MiB
+
+	// maxDisplayStringLen bounds server-controlled status/display strings retained in memory or JSON.
+	maxDisplayStringLen = 64
 )
 
 // rawConfig loads the merged kubeconfig, optionally restricted to a single
