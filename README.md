@@ -82,12 +82,23 @@ The backend Go CLI (`bin/omakube`) uses `client-go` and `DiscoveryClient.ServerP
 
 ---
 
+## Prerequisites & Dependencies
+
+- **Kubernetes Access:** Standard `~/.kube/config` or `$KUBECONFIG` with context(s) configured.
+- **System Utilities:**
+  - `xdg-open` (standard on Omarchy/Linux) — used by the *Open Folder* button to open exported logs in your default file manager.
+- **Build Dependencies (Optional):**
+  - Go 1.22+ — only required if you choose to build the `bin/omakube` backend binary from source. The repository ships with a prebuilt binary ready for use on Linux x86_64.
+
+---
+
 ## Installation & Setup
 
 1. **Clone or link into Omarchy plugins directory:**
    ```bash
-   ln -sfn ~/MyData/Oma-Plugins/OmaKube ~/.config/omarchy/plugins/omakube
+   git clone https://github.com/NethunRanasinghe/OmaKube.git ~/.config/omarchy/plugins/omakube
    ```
+   *(Or link a local development checkout: `ln -sfn ~/MyData/Oma-Plugins/OmaKube ~/.config/omarchy/plugins/omakube`)*
 
 2. **Validate the plugin contract:**
    ```bash
@@ -105,6 +116,33 @@ The backend Go CLI (`bin/omakube`) uses `client-go` and `DiscoveryClient.ServerP
    # Opening the popup should add NO new client (anchored layer-shell popup):
    hyprctl clients | grep -c "Window "
    ```
+
+---
+
+## Removal & Uninstallation
+
+1. **Disable the widget from your Omarchy bar:**
+   ```bash
+   omarchy plugin disable omakube
+   omarchy restart shell
+   ```
+
+2. **Remove plugin files completely:**
+   ```bash
+   rm -rf ~/.config/omarchy/plugins/omakube
+   omarchy restart shell
+   ```
+
+*Note: Removing the plugin leaves your `$KUBECONFIG`, clusters, and exported log files (`~/omakube-logs`) untouched.*
+
+---
+
+## Configuration & Safety Guarantees
+
+- **Non-Destructive by Default:** OmaKube respects user configuration and never alters global shell settings. It only saves user-configured preferences (e.g. default namespace, log export folder) within its own isolated `omakube` entry in `~/.config/omarchy/shell.json`.
+- **Kubeconfig Integrity:** Clusters and credentials are read strictly via client-go and never copied, transmitted, or modified.
+- **Confirmation Guards:** All mutating cluster actions (pod deletion, deployment rollout restart) require explicit confirmation dialog prompts naming the exact resource, namespace, and cluster.
+- **Read-Only Mode:** Can be toggled on anytime in Settings to lock down all mutations and port-forwarding.
 
 ---
 
