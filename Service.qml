@@ -519,23 +519,35 @@ Item {
     }
   }
 
+  function sanitizePathSegment(val) {
+    var s = String(val || "")
+    s = s.replace(/[^a-zA-Z0-9_-]/g, "_")
+    s = s.replace(/_+/g, "_")
+    s = s.replace(/^[-_]+|[-_]+$/g, "")
+    return s || "unknown"
+  }
+
   function resolveExportDir(dir) {
     var raw = String(dir || setting("logExportDir", "") || (Quickshell.env("HOME") + "/omakube-logs")).trim()
     if (raw === "") raw = (Quickshell.env("HOME") || "") + "/omakube-logs"
     if (raw.indexOf("~/") === 0) raw = (Quickshell.env("HOME") || "") + raw.slice(1)
-    return raw
+    return raw.replace(/\/+$/, "")
   }
 
   function exportLogs(dir) {
     if (exProcess.running || logPod === "") return
     var stamp = Qt.formatDateTime(new Date(), "yyyyMMdd-hhmmss")
     var baseDir = resolveExportDir(dir)
-    var target = baseDir
-      + "/omakube-" + activeContextName + "-" + activeNamespace + "-" + logPod
-      + (logContainer !== "" ? "-" + logContainer : "") + "-" + stamp + ".txt"
+    var safeCtx = sanitizePathSegment(activeContextName)
+    var safeNs = sanitizePathSegment(activeNamespace)
+    var safePod = sanitizePathSegment(logPod)
+    var safeContainer = logContainer !== "" ? "-" + sanitizePathSegment(logContainer) : ""
+    var filename = "omakube-" + safeCtx + "-" + safeNs + "-" + safePod + safeContainer + "-" + stamp + ".txt"
+    var target = baseDir + "/" + filename
     actionStatus = "Exporting logs…"
     var cmd = [cliPath, "logs", "--context", activeContextName, "--namespace", activeNamespace,
-      "--pod", logPod, "--tail", "2000", "--timeout", "15", "--out", target]
+      "--pod", logPod, "--tail", "2000", "--timeout", "15",
+      "--out-dir", baseDir, "--out", target]
     if (logContainer !== "") cmd.push("--container", logContainer)
     exProcess.command = cmd.concat(kubeconfigArgs())
     _exportTarget = target
@@ -849,7 +861,13 @@ Item {
     stderr: StdioCollector { id: exStderr; waitForEnd: true }
     onExited: function(exitCode) {
       if (exitCode === 0) {
-        root.actionStatus = "Saved " + root._exportTarget
+        var out = String(exStdout.text || "")
+        var fileCreated = root._exportTarget
+        try {
+          var res = JSON.parse(out)
+          if (res && res.file) fileCreated = String(res.file)
+        } catch (e) {}
+        root.actionStatus = "Saved " + fileCreated
         statusTimer.restart()
       } else {
         root.lastError = Model.humanError(String(exStderr.text || "")) || "Export failed"

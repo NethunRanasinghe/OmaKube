@@ -16,7 +16,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
-func runLogs(contextName, override, namespace, pod, container string, tail int, outPath string, timeoutSec int) error {
+func runLogs(contextName, override, namespace, pod, container string, tail int, outPath, outDir string, timeoutSec int) error {
 	ctxName := strings.TrimSpace(contextName)
 	if ctxName == "" {
 		return fmt.Errorf("logs: --context is required")
@@ -76,13 +76,14 @@ func runLogs(contextName, override, namespace, pod, container string, tail int, 
 		lines = []string{}
 	}
 
-	if outPath != "" {
-		if err := writeLogExport(outPath, ctxName, ns, pod, container, lines); err != nil {
+	if outPath != "" || outDir != "" {
+		finalFile, err := writeLogExport(outPath, outDir, ctxName, ns, pod, container, lines)
+		if err != nil {
 			return err
 		}
 		raw, _ := json.Marshal(map[string]any{
 			"pod": pod, "container": container, "containers": containers,
-			"lines": len(lines), "file": outPath,
+			"lines": len(lines), "file": finalFile,
 		})
 		fmt.Println(string(raw))
 		return nil
@@ -97,11 +98,86 @@ func runLogs(contextName, override, namespace, pod, container string, tail int, 
 	return nil
 }
 
-func writeLogExport(path, ctxName, ns, pod, container string, lines []string) error {
-	dir := filepath.Dir(path)
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		return fmt.Errorf("export: %w", err)
+// sanitizePathSegment ensures values interpolated into filenames or export directories
+// strictly contain only safe characters, preventing directory traversal (.., /, \).
+func sanitizePathSegment(val string) string {
+	s := strings.TrimSpace(val)
+	var b strings.Builder
+	lastUnderscore := false
+	for _, r := range s {
+		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '_' || r == '-' {
+			b.WriteRune(r)
+			lastUnderscore = false
+		} else if !lastUnderscore {
+			b.WriteByte('_')
+			lastUnderscore = true
+		}
 	}
+	res := strings.Trim(b.String(), "_-")
+	if res == "" {
+		return "unknown"
+	}
+	return res
+}
+
+func writeLogExport(outPath, outDir, ctxName, ns, pod, container string, lines []string) (string, error) {
+	var targetPath string
+	var exportDir string
+
+	if outDir != "" {
+		exportDir = filepath.Clean(outDir)
+	}
+
+	if outPath != "" {
+		cleanPath := filepath.Clean(outPath)
+		filename := filepath.Base(cleanPath)
+
+		if filename == "." || filename == ".." || filename == "/" || filename == "\\" || filename == "" {
+			return "", fmt.Errorf("export: invalid target filename in %q", outPath)
+		}
+
+		if exportDir != "" {
+			// When outDir is specified, outPath MUST resolve directly inside exportDir without traversal.
+			rel, err := filepath.Rel(exportDir, cleanPath)
+			if err != nil || strings.HasPrefix(rel, "..") || rel == "." || strings.Contains(rel, "/") || strings.Contains(rel, "\\") {
+				return "", fmt.Errorf("export: target path %q traverses outside log directory %q", outPath, exportDir)
+			}
+			targetPath = cleanPath
+		} else {
+			targetPath = cleanPath
+			exportDir = filepath.Dir(cleanPath)
+		}
+	} else if exportDir != "" {
+		safeCtx := sanitizePathSegment(ctxName)
+		safeNs := sanitizePathSegment(ns)
+		safePod := sanitizePathSegment(pod)
+		safeC := ""
+		if container != "" {
+			safeC = "-" + sanitizePathSegment(container)
+		}
+		stamp := time.Now().Format("20060102-150405")
+		filename := fmt.Sprintf("omakube-%s-%s-%s%s-%s.txt", safeCtx, safeNs, safePod, safeC, stamp)
+		targetPath = filepath.Join(exportDir, filename)
+	} else {
+		return "", fmt.Errorf("export: destination path or directory required")
+	}
+
+	// Refuse writing directly to critical system directories
+	switch exportDir {
+	case "/", "/etc", "/usr", "/bin", "/sbin", "/boot", "/lib", "/lib64", "/sys", "/proc", "/dev", "/root":
+		return "", fmt.Errorf("export: refusing to write to system directory %q", exportDir)
+	}
+
+	if err := os.MkdirAll(exportDir, 0o755); err != nil {
+		return "", fmt.Errorf("export: directory creation failed: %w", err)
+	}
+
+	f, finalPath, err := openSafeExportFile(targetPath)
+	if err != nil {
+		return "", fmt.Errorf("export: %w", err)
+	}
+	defer f.Close()
+
 	var b strings.Builder
 	fmt.Fprintf(&b, "# omakube log export — %s / %s / pod %s / container %s\n",
 		ctxName, ns, pod, container)
@@ -110,8 +186,34 @@ func writeLogExport(path, ctxName, ns, pod, container string, lines []string) er
 		b.WriteString(l)
 		b.WriteByte('\n')
 	}
-	if err := os.WriteFile(path, []byte(b.String()), 0o644); err != nil {
-		return fmt.Errorf("export: %w", err)
+	if _, err := f.WriteString(b.String()); err != nil {
+		return "", fmt.Errorf("export: write failed: %w", err)
 	}
-	return nil
+	return finalPath, nil
+}
+
+func openSafeExportFile(targetPath string) (*os.File, string, error) {
+	// Mode 0o600 (owner read/write only). O_EXCL prevents overwriting existing files.
+	f, err := os.OpenFile(targetPath, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	if err == nil {
+		return f, targetPath, nil
+	}
+	if !os.IsExist(err) {
+		return nil, "", err
+	}
+
+	// File collision: append sequence suffix up to 50 attempts
+	ext := filepath.Ext(targetPath)
+	base := strings.TrimSuffix(targetPath, ext)
+	for i := 1; i <= 50; i++ {
+		alt := fmt.Sprintf("%s-%d%s", base, i, ext)
+		f, err = os.OpenFile(alt, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+		if err == nil {
+			return f, alt, nil
+		}
+		if !os.IsExist(err) {
+			return nil, "", err
+		}
+	}
+	return nil, "", fmt.Errorf("file %q already exists; refusing to overwrite", targetPath)
 }

@@ -31,7 +31,7 @@ func usage() {
 	fmt.Fprintln(os.Stderr, "  namespaces --context NAME [--timeout SEC] [--kubeconfig PATH]")
 	fmt.Fprintln(os.Stderr, "  workloads --context NAME [--namespace NS] [--timeout SEC] [--kubeconfig PATH]")
 	fmt.Fprintln(os.Stderr, "  events --context NAME [--namespace NS] [--timeout SEC] [--kubeconfig PATH]")
-	fmt.Fprintln(os.Stderr, "  logs --context NAME [--namespace NS] --pod POD [--container C] [--tail N] [--out PATH] [--kubeconfig PATH]")
+	fmt.Fprintln(os.Stderr, "  logs --context NAME [--namespace NS] --pod POD [--container C] [--tail N] [--out PATH] [--out-dir DIR] [--kubeconfig PATH]")
 	fmt.Fprintln(os.Stderr, "  restart --context NAME [--namespace NS] --kind deployment|statefulset|daemonset --name NAME")
 	fmt.Fprintln(os.Stderr, "  delete-pod --context NAME [--namespace NS] --name POD")
 	fmt.Fprintln(os.Stderr, "  port-forward --context NAME [--namespace NS] --target-kind pod|service|deployment --target NAME [--local-port L] --remote-port R")
@@ -121,12 +121,13 @@ func main() {
 		container := fs.String("container", "", "")
 		tail := fs.Int("tail", 200, "")
 		out := fs.String("out", "", "")
+		outDir := fs.String("out-dir", "", "")
 		timeout := fs.Int("timeout", 10, "")
 		kcfg := fs.String("kubeconfig", "", "")
 		if ferr := fs.Parse(os.Args[2:]); ferr != nil {
 			os.Exit(2)
 		}
-		err = runLogs(*ctx, *kcfg, *ns, *pod, *container, *tail, *out, *timeout)
+		err = runLogs(*ctx, *kcfg, *ns, *pod, *container, *tail, *out, *outDir, *timeout)
 	case "restart":
 		fs := flag.NewFlagSet("restart", flag.ContinueOnError)
 		ctx := fs.String("context", "", "")
