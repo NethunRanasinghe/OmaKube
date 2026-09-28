@@ -43,6 +43,7 @@ function statusGlyph(status) {
 function humanError(raw) {
   var s = String(raw || "")
   if (s === "") return ""
+  if (/no such file|not found/i.test(s) && /omakube/i.test(s)) return "Backend binary not found. Build it with 'make' in ~/.config/omarchy/plugins/omakube."
   if (/exec plugin/i.test(s)) return "Auth plugin failed (aws-iam-authenticator / gke-gcloud-auth-plugin / oidc). Check the plugin binary and your kubeconfig."
   if (/token.*expir|expir.*token|unauthorized|401/i.test(s)) return "Token expired or unauthorized. Re-authenticate this context (re-login / refresh credentials)."
   if (/connection refused|no such host|i\/o timeout|unreachable|network/i.test(s)) return "API server unreachable. Check VPN / network, then retry."

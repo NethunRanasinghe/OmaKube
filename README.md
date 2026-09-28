@@ -60,13 +60,13 @@ The backend Go CLI (`bin/omakube`) uses `client-go` and `DiscoveryClient.ServerP
 ```
 ├── manifest.json       # Omarchy plugin contract & configuration schema
 ├── LICENSE             # MIT License
+├── Makefile            # Build recipe to compile backend from source
 ├── README.md           # Documentation & usage guide
 ├── Panel.qml           # Primary UI entry point (bar pill + popup + popovers)
 ├── Service.qml         # Asynchronous data owner & process supervisor
 ├── Model.js            # Pure functional helpers, status mappings, and log styling
 ├── OmakubeIcon.qml     # Helm-mark vector icon
-├── bin/
-│   └── omakube         # Compiled backend binary (Go + client-go)
+├── bin/                # Target directory for compiled backend binary (bin/omakube)
 └── backend/            # Go backend source code
     ├── main.go         # CLI entry point & argument parser
     ├── kube.go         # Kubeconfig resolution & client builder
@@ -85,10 +85,10 @@ The backend Go CLI (`bin/omakube`) uses `client-go` and `DiscoveryClient.ServerP
 ## Prerequisites & Dependencies
 
 - **Kubernetes Access:** Standard `~/.kube/config` or `$KUBECONFIG` with context(s) configured.
+- **Go Toolchain:** Go 1.22+ (to compile the backend binary from reviewed source).
 - **System Utilities:**
+  - `make` (standard build tool, to invoke the Makefile).
   - `xdg-open` (standard on Omarchy/Linux) — used by the *Open Folder* button to open exported logs in your default file manager.
-- **Build Dependencies (Optional):**
-  - Go 1.22+ — only required if you choose to build the `bin/omakube` backend binary from source. The repository ships with a prebuilt binary ready for use on Linux x86_64.
 
 ---
 
@@ -100,18 +100,25 @@ The backend Go CLI (`bin/omakube`) uses `client-go` and `DiscoveryClient.ServerP
    ```
    *(Or link a local development checkout: `ln -sfn ~/MyData/Oma-Plugins/OmaKube ~/.config/omarchy/plugins/omakube`)*
 
-2. **Validate the plugin contract:**
+2. **Build the backend binary from source:**
+   ```bash
+   cd ~/.config/omarchy/plugins/omakube
+   make
+   ```
+   *This compiles `backend/` into `bin/omakube` using your local Go compiler from reviewed source.*
+
+3. **Validate the plugin contract:**
    ```bash
    omarchy plugin validate ~/.config/omarchy/plugins/omakube
    ```
 
-3. **Enable in your Omarchy bar:**
+4. **Enable in your Omarchy bar:**
    ```bash
    omarchy plugin enable omakube --section right
    omarchy restart shell
    ```
 
-4. **Verify popup rendering:**
+5. **Verify popup rendering:**
    ```bash
    # Opening the popup should add NO new client (anchored layer-shell popup):
    hyprctl clients | grep -c "Window "
@@ -148,11 +155,17 @@ The backend Go CLI (`bin/omakube`) uses `client-go` and `DiscoveryClient.ServerP
 
 ## Backend Development & Manual Testing
 
-Compile the Go backend binary:
+Compile the Go backend binary using `make`:
+
+```bash
+make
+```
+
+Or build manually via Go:
 
 ```bash
 cd backend
-go build -o ../bin/omakube .
+CGO_ENABLED=0 go build -ldflags="-s -w" -o ../bin/omakube .
 cd ..
 ```
 

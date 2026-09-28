@@ -755,7 +755,7 @@ Item {
       var out = String(contextsStdout.text || "")
       var err = String(contextsStderr.text || "")
       if (exitCode !== 0 && out === "") {
-        root.lastError = Model.humanError(err) || ("Backend failed (exit " + exitCode + "): " + root.cliPath)
+        root.lastError = Model.humanError(err) || ("Backend binary missing or failed (exit " + exitCode + "). Build it with 'make' in plugin folder.")
         root.lastErrorKind = "unknown"
         root.refreshing = false
         root.warmedUp = true
