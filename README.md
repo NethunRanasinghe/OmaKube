@@ -99,7 +99,16 @@ The backend Go CLI (`bin/omakube`) uses `client-go` and `DiscoveryClient.ServerP
 
 ## Installation & Setup
 
-1. **Clone or link into Omarchy plugins directory:**
+### Quick Install (Omarchy CLI)
+
+```bash
+omarchy plugin add https://github.com/NethunRanasinghe/OmaKube.git --enable
+make -C ~/.config/omarchy/plugins/omakube
+```
+
+### Manual Install
+
+1. **Clone into Omarchy plugins directory:**
    ```bash
    git clone https://github.com/NethunRanasinghe/OmaKube.git ~/.config/omarchy/plugins/omakube
    ```
