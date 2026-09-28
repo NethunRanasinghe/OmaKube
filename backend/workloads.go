@@ -16,6 +16,8 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/kubernetes"
+	"k8s.io/client-go/metadata"
+	"k8s.io/client-go/rest"
 )
 
 type podInfo struct {
@@ -137,7 +139,7 @@ func runWorkloads(contextName, override, namespace string, timeoutSec int) error
 		queryNs = ""
 	}
 
-	dyn, cs, err := dynamicClientFor(ctxName, override, timeoutSec)
+	dyn, cs, cfg, err := dynamicClientFor(ctxName, override, timeoutSec)
 	if err != nil {
 		return err
 	}
@@ -150,7 +152,7 @@ func runWorkloads(contextName, override, namespace string, timeoutSec int) error
 	}
 
 	// 1. Pods
-	if pods, err := cs.CoreV1().Pods(queryNs).List(ctx, metav1.ListOptions{}); err == nil {
+	if pods, err := cs.CoreV1().Pods(queryNs).List(ctx, metav1.ListOptions{Limit: defaultListLimit}); err == nil {
 		podInfos := make([]podInfo, 0, len(pods.Items))
 		for i := range pods.Items {
 			p := &pods.Items[i]
@@ -195,7 +197,7 @@ func runWorkloads(contextName, override, namespace string, timeoutSec int) error
 	}
 
 	// 2. Deployments
-	if deps, err := cs.AppsV1().Deployments(queryNs).List(ctx, metav1.ListOptions{}); err == nil {
+	if deps, err := cs.AppsV1().Deployments(queryNs).List(ctx, metav1.ListOptions{Limit: defaultListLimit}); err == nil {
 		depInfos := make([]scaleInfo, 0, len(deps.Items))
 		for i := range deps.Items {
 			d := &deps.Items[i]
@@ -214,7 +216,7 @@ func runWorkloads(contextName, override, namespace string, timeoutSec int) error
 	}
 
 	// 3. StatefulSets
-	if stss, err := cs.AppsV1().StatefulSets(queryNs).List(ctx, metav1.ListOptions{}); err == nil {
+	if stss, err := cs.AppsV1().StatefulSets(queryNs).List(ctx, metav1.ListOptions{Limit: defaultListLimit}); err == nil {
 		infos := make([]scaleInfo, 0, len(stss.Items))
 		for i := range stss.Items {
 			s := &stss.Items[i]
@@ -237,7 +239,7 @@ func runWorkloads(contextName, override, namespace string, timeoutSec int) error
 	}
 
 	// 4. DaemonSets
-	if dss, err := cs.AppsV1().DaemonSets(queryNs).List(ctx, metav1.ListOptions{}); err == nil {
+	if dss, err := cs.AppsV1().DaemonSets(queryNs).List(ctx, metav1.ListOptions{Limit: defaultListLimit}); err == nil {
 		infos := make([]scaleInfo, 0, len(dss.Items))
 		for i := range dss.Items {
 			d := &dss.Items[i]
@@ -260,7 +262,7 @@ func runWorkloads(contextName, override, namespace string, timeoutSec int) error
 	}
 
 	// 5. Services
-	if svcs, err := cs.CoreV1().Services(queryNs).List(ctx, metav1.ListOptions{}); err == nil {
+	if svcs, err := cs.CoreV1().Services(queryNs).List(ctx, metav1.ListOptions{Limit: defaultListLimit}); err == nil {
 		infos := make([]serviceInfo, 0, len(svcs.Items))
 		for i := range svcs.Items {
 			s := &svcs.Items[i]
@@ -284,7 +286,7 @@ func runWorkloads(contextName, override, namespace string, timeoutSec int) error
 
 	// 6. Jobs & CronJobs
 	jobs := []jobInfo{}
-	if jl, err := cs.BatchV1().Jobs(queryNs).List(ctx, metav1.ListOptions{}); err == nil {
+	if jl, err := cs.BatchV1().Jobs(queryNs).List(ctx, metav1.ListOptions{Limit: defaultListLimit}); err == nil {
 		for i := range jl.Items {
 			j := &jl.Items[i]
 			display, st := "Complete", "succeeded"
@@ -300,7 +302,7 @@ func runWorkloads(contextName, override, namespace string, timeoutSec int) error
 			})
 		}
 	}
-	if cl, err := cs.BatchV1().CronJobs(queryNs).List(ctx, metav1.ListOptions{}); err == nil {
+	if cl, err := cs.BatchV1().CronJobs(queryNs).List(ctx, metav1.ListOptions{Limit: defaultListLimit}); err == nil {
 		for i := range cl.Items {
 			c := &cl.Items[i]
 			display, st := "Scheduled", "waiting"
@@ -317,7 +319,7 @@ func runWorkloads(contextName, override, namespace string, timeoutSec int) error
 	result["jobs"] = jobs
 
 	// 7. Ingresses
-	if ings, err := cs.NetworkingV1().Ingresses(queryNs).List(ctx, metav1.ListOptions{}); err == nil && len(ings.Items) > 0 {
+	if ings, err := cs.NetworkingV1().Ingresses(queryNs).List(ctx, metav1.ListOptions{Limit: defaultListLimit}); err == nil && len(ings.Items) > 0 {
 		infos := make([]ingressInfo, 0, len(ings.Items))
 		for i := range ings.Items {
 			ing := &ings.Items[i]
@@ -341,38 +343,19 @@ func runWorkloads(contextName, override, namespace string, timeoutSec int) error
 		result["ingresses"] = infos
 	}
 
-	// 8. ConfigMaps
-	if cms, err := cs.CoreV1().ConfigMaps(queryNs).List(ctx, metav1.ListOptions{}); err == nil && len(cms.Items) > 0 {
-		infos := make([]configMapInfo, 0, len(cms.Items))
-		for i := range cms.Items {
-			cm := &cms.Items[i]
-			infos = append(infos, configMapInfo{
-				Name: cm.Name, Namespace: cm.Namespace, Display: fmt.Sprintf("%d keys", len(cm.Data)),
-				Kind: "running", DataCount: len(cm.Data),
-				Age: ageString(cm.CreationTimestamp), AgeSeconds: ageSeconds(cm.CreationTimestamp),
-			})
-		}
-		sort.Slice(infos, func(i, j int) bool { return infos[i].Name < infos[j].Name })
-		result["configmaps"] = infos
+	// 8. ConfigMaps: Table query avoids retrieving large data payloads into memory.
+	if cms := fetchConfigMaps(ctx, cs, queryNs, defaultListLimit); len(cms) > 0 {
+		result["configmaps"] = cms
 	}
 
-	// 9. Secrets
-	if secs, err := cs.CoreV1().Secrets(queryNs).List(ctx, metav1.ListOptions{}); err == nil && len(secs.Items) > 0 {
-		infos := make([]secretInfo, 0, len(secs.Items))
-		for i := range secs.Items {
-			s := &secs.Items[i]
-			infos = append(infos, secretInfo{
-				Name: s.Name, Namespace: s.Namespace, Display: string(s.Type),
-				Kind: "running", Type: string(s.Type), DataCount: len(s.Data),
-				Age: ageString(s.CreationTimestamp), AgeSeconds: ageSeconds(s.CreationTimestamp),
-			})
-		}
-		sort.Slice(infos, func(i, j int) bool { return infos[i].Name < infos[j].Name })
-		result["secrets"] = infos
+	// 9. Secrets: Table query retrieves metadata, type, and key count WITHOUT fetching or decoding
+	// sensitive credential values (.Data or .StringData) across the network or into memory.
+	if secs := fetchSecretsMetadata(ctx, cs, cfg, queryNs, defaultListLimit); len(secs) > 0 {
+		result["secrets"] = secs
 	}
 
 	// 10. PersistentVolumeClaims (PVC)
-	if pvcs, err := cs.CoreV1().PersistentVolumeClaims(queryNs).List(ctx, metav1.ListOptions{}); err == nil && len(pvcs.Items) > 0 {
+	if pvcs, err := cs.CoreV1().PersistentVolumeClaims(queryNs).List(ctx, metav1.ListOptions{Limit: defaultListLimit}); err == nil && len(pvcs.Items) > 0 {
 		infos := make([]pvcInfo, 0, len(pvcs.Items))
 		for i := range pvcs.Items {
 			p := &pvcs.Items[i]
@@ -553,4 +536,206 @@ func deploymentDisplay(d *appsv1.Deployment) (string, string) {
 		return "Progressing", "waiting"
 	}
 	return "Available", "running"
+}
+
+// fetchSecretsMetadata queries secrets as a Table to retrieve metadata, type, and key counts
+// WITHOUT fetching or decoding sensitive Secret payload/credential values (.Data, .StringData).
+// The API server converts the secret into table rows containing only display columns,
+// completely avoiding credential transmission and unnecessary memory allocation.
+func fetchSecretsMetadata(ctx context.Context, cs *kubernetes.Clientset, cfg *rest.Config, queryNs string, limit int64) []secretInfo {
+	var table metav1.Table
+	req := cs.CoreV1().RESTClient().Get().
+		Resource("secrets").
+		SetHeader("Accept", "application/json;as=Table;v=v1;g=meta.k8s.io,application/json;as=Table;v=v1beta1;g=meta.k8s.io")
+	if queryNs != "" {
+		req = req.Namespace(queryNs)
+	}
+	opts := metav1.ListOptions{Limit: limit}
+	err := req.VersionedParams(&opts, metav1.ParameterCodec).Do(ctx).Into(&table)
+	if err == nil && len(table.Rows) > 0 {
+		nameCol, typeCol, dataCol := -1, -1, -1
+		for idx, col := range table.ColumnDefinitions {
+			switch strings.ToLower(col.Name) {
+			case "name":
+				nameCol = idx
+			case "type":
+				typeCol = idx
+			case "data":
+				dataCol = idx
+			}
+		}
+
+		infos := make([]secretInfo, 0, len(table.Rows))
+		for _, row := range table.Rows {
+			var meta metav1.PartialObjectMetadata
+			if len(row.Object.Raw) > 0 {
+				_ = json.Unmarshal(row.Object.Raw, &meta)
+			}
+			name := meta.Name
+			if name == "" && nameCol >= 0 && nameCol < len(row.Cells) {
+				name = fmt.Sprintf("%v", row.Cells[nameCol])
+			}
+			if name == "" {
+				continue
+			}
+			ns := meta.Namespace
+			if ns == "" && queryNs != "" {
+				ns = queryNs
+			}
+			secType := "Opaque"
+			if typeCol >= 0 && typeCol < len(row.Cells) {
+				if tStr := fmt.Sprintf("%v", row.Cells[typeCol]); tStr != "" && tStr != "<nil>" {
+					secType = tStr
+				}
+			}
+			dataCount := 0
+			if dataCol >= 0 && dataCol < len(row.Cells) {
+				switch v := row.Cells[dataCol].(type) {
+				case float64:
+					dataCount = int(v)
+				case int64:
+					dataCount = int(v)
+				case int:
+					dataCount = v
+				case string:
+					fmt.Sscanf(v, "%d", &dataCount)
+				}
+			}
+			age := ageString(meta.CreationTimestamp)
+			ageSec := ageSeconds(meta.CreationTimestamp)
+			infos = append(infos, secretInfo{
+				Name:       name,
+				Namespace:  ns,
+				Display:    secType,
+				Kind:       "running",
+				Type:       secType,
+				DataCount:  dataCount,
+				Age:        age,
+				AgeSeconds: ageSec,
+			})
+		}
+		sort.Slice(infos, func(i, j int) bool { return infos[i].Name < infos[j].Name })
+		return infos
+	}
+
+	// Safe fallback: metadata-only client. Never downloads or decodes Secret .Data or credentials.
+	if cfg != nil {
+		if metaClient, mErr := metadata.NewForConfig(cfg); mErr == nil {
+			gvr := schema.GroupVersionResource{Group: "", Version: "v1", Resource: "secrets"}
+			var mList *metav1.PartialObjectMetadataList
+			if queryNs != "" {
+				mList, err = metaClient.Resource(gvr).Namespace(queryNs).List(ctx, metav1.ListOptions{Limit: limit})
+			} else {
+				mList, err = metaClient.Resource(gvr).List(ctx, metav1.ListOptions{Limit: limit})
+			}
+			if err == nil && len(mList.Items) > 0 {
+				infos := make([]secretInfo, 0, len(mList.Items))
+				for i := range mList.Items {
+					m := &mList.Items[i]
+					infos = append(infos, secretInfo{
+						Name:       m.Name,
+						Namespace:  m.Namespace,
+						Display:    "Secret",
+						Kind:       "running",
+						Type:       "Secret",
+						DataCount:  0,
+						Age:        ageString(m.CreationTimestamp),
+						AgeSeconds: ageSeconds(m.CreationTimestamp),
+					})
+				}
+				sort.Slice(infos, func(i, j int) bool { return infos[i].Name < infos[j].Name })
+				return infos
+			}
+		}
+	}
+
+	return nil
+}
+
+// fetchConfigMaps lists configmaps, preferring a Table request to avoid fetching large config payloads.
+// Falls back to bounded standard List if Table is unavailable.
+func fetchConfigMaps(ctx context.Context, cs *kubernetes.Clientset, queryNs string, limit int64) []configMapInfo {
+	var table metav1.Table
+	req := cs.CoreV1().RESTClient().Get().
+		Resource("configmaps").
+		SetHeader("Accept", "application/json;as=Table;v=v1;g=meta.k8s.io,application/json;as=Table;v=v1beta1;g=meta.k8s.io")
+	if queryNs != "" {
+		req = req.Namespace(queryNs)
+	}
+	opts := metav1.ListOptions{Limit: limit}
+	err := req.VersionedParams(&opts, metav1.ParameterCodec).Do(ctx).Into(&table)
+	if err == nil && len(table.Rows) > 0 {
+		nameCol, dataCol := -1, -1
+		for idx, col := range table.ColumnDefinitions {
+			switch strings.ToLower(col.Name) {
+			case "name":
+				nameCol = idx
+			case "data":
+				dataCol = idx
+			}
+		}
+
+		infos := make([]configMapInfo, 0, len(table.Rows))
+		for _, row := range table.Rows {
+			var meta metav1.PartialObjectMetadata
+			if len(row.Object.Raw) > 0 {
+				_ = json.Unmarshal(row.Object.Raw, &meta)
+			}
+			name := meta.Name
+			if name == "" && nameCol >= 0 && nameCol < len(row.Cells) {
+				name = fmt.Sprintf("%v", row.Cells[nameCol])
+			}
+			if name == "" {
+				continue
+			}
+			ns := meta.Namespace
+			if ns == "" && queryNs != "" {
+				ns = queryNs
+			}
+			dataCount := 0
+			if dataCol >= 0 && dataCol < len(row.Cells) {
+				switch v := row.Cells[dataCol].(type) {
+				case float64:
+					dataCount = int(v)
+				case int64:
+					dataCount = int(v)
+				case int:
+					dataCount = v
+				case string:
+					fmt.Sscanf(v, "%d", &dataCount)
+				}
+			}
+			infos = append(infos, configMapInfo{
+				Name:       name,
+				Namespace:  ns,
+				Display:    fmt.Sprintf("%d keys", dataCount),
+				Kind:       "running",
+				DataCount:  dataCount,
+				Age:        ageString(meta.CreationTimestamp),
+				AgeSeconds: ageSeconds(meta.CreationTimestamp),
+			})
+		}
+		sort.Slice(infos, func(i, j int) bool { return infos[i].Name < infos[j].Name })
+		return infos
+	}
+
+	// Fallback to standard List with strict Limit
+	if cms, err := cs.CoreV1().ConfigMaps(queryNs).List(ctx, metav1.ListOptions{Limit: limit}); err == nil && len(cms.Items) > 0 {
+		infos := make([]configMapInfo, 0, len(cms.Items))
+		for i := range cms.Items {
+			cm := &cms.Items[i]
+			infos = append(infos, configMapInfo{
+				Name:       cm.Name,
+				Namespace:  cm.Namespace,
+				Display:    fmt.Sprintf("%d keys", len(cm.Data)),
+				Kind:       "running",
+				DataCount:  len(cm.Data),
+				Age:        ageString(cm.CreationTimestamp),
+				AgeSeconds: ageSeconds(cm.CreationTimestamp),
+			})
+		}
+		sort.Slice(infos, func(i, j int) bool { return infos[i].Name < infos[j].Name })
+		return infos
+	}
+	return nil
 }

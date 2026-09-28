@@ -92,7 +92,7 @@ func runHealth(contextName, override, namespace string, timeoutSec int) error {
 	rep.Reachable = true
 
 	// Nodes (may be RBAC-forbidden — degrade, don't fail).
-	if nodes, err := cs.CoreV1().Nodes().List(ctx, metav1.ListOptions{}); err != nil {
+	if nodes, err := cs.CoreV1().Nodes().List(ctx, metav1.ListOptions{Limit: defaultListLimit}); err != nil {
 		if errors.IsForbidden(err) {
 			rep.NodesVisible = false
 		} else {
@@ -102,6 +102,9 @@ func runHealth(contextName, override, namespace string, timeoutSec int) error {
 	} else {
 		rep.NodesVisible = true
 		rep.NodesTotal = len(nodes.Items)
+		if nodes.RemainingItemCount != nil {
+			rep.NodesTotal += int(*nodes.RemainingItemCount)
+		}
 		for i := range nodes.Items {
 			if nodeReady(&nodes.Items[i]) {
 				rep.NodesReady++
@@ -109,8 +112,8 @@ func runHealth(contextName, override, namespace string, timeoutSec int) error {
 		}
 	}
 
-	// Pods across all namespaces (single LIST).
-	if pods, err := cs.CoreV1().Pods("").List(ctx, metav1.ListOptions{}); err != nil {
+	// Pods across all namespaces (bounded LIST).
+	if pods, err := cs.CoreV1().Pods("").List(ctx, metav1.ListOptions{Limit: maxHealthPodLimit}); err != nil {
 		if errors.IsForbidden(err) {
 			if rep.Error == "" {
 				rep.Error = "pods list forbidden by RBAC"
@@ -152,6 +155,9 @@ func runHealth(contextName, override, namespace string, timeoutSec int) error {
 					rep.NsFailing++
 				}
 			}
+		}
+		if pods.RemainingItemCount != nil {
+			rep.PodsTotal += int(*pods.RemainingItemCount)
 		}
 	}
 

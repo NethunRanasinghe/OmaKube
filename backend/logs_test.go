@@ -113,3 +113,16 @@ func TestWriteLogExportSafeAutoName(t *testing.T) {
 		t.Errorf("expected sanitized context name 'x_outside' in filename, got %q", filepath.Base(finalPath))
 	}
 }
+
+func TestWriteLogExportSystemDirRejection(t *testing.T) {
+	systemDirs := []string{"/etc", "/etc/cron.d", "/usr", "/usr/local/bin", "/root", "/boot"}
+	for _, sysDir := range systemDirs {
+		_, err := writeLogExport("", sysDir, "ctx", "default", "pod", "", []string{"log"})
+		if err == nil {
+			t.Errorf("expected error when writing to system dir %q, got nil", sysDir)
+		}
+		if !strings.Contains(err.Error(), "refusing to write to system directory") {
+			t.Errorf("unexpected error for %q: %v", sysDir, err)
+		}
+	}
+}

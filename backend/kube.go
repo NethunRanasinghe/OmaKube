@@ -12,6 +12,19 @@ import (
 	clientcmdapi "k8s.io/client-go/tools/clientcmd/api"
 )
 
+const (
+	// defaultListLimit bounds the number of items requested per API call,
+	// preventing cluster-controlled memory exhaustion in the helper process.
+	// 500 is consistent with kubectl's default chunk size.
+	defaultListLimit = 500
+
+	// maxEventsLimit bounds the events returned to the most recent items.
+	maxEventsLimit = 200
+
+	// maxHealthPodLimit bounds the pod count evaluated during periodic health checks.
+	maxHealthPodLimit = 1000
+)
+
 // rawConfig loads the merged kubeconfig, optionally restricted to a single
 // file via --kubeconfig (the settings override).
 func rawConfig(kubeconfigOverride string) (clientcmdapi.Config, error) {

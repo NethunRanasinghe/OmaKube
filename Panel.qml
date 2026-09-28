@@ -531,11 +531,11 @@ Panel {
 
   IpcHandler {
     target: root.ipcTarget
-    function open(): void { root.open() }
-    function close(): void { root.close() }
-    function show(): void { root.open() }
-    function hide(): void { root.close() }
-    function toggle(): void { root.toggle() }
+    function open(): void { if (!root.opened) root.toggleFull() }
+    function close(): void { root.closeAll() }
+    function show(): void { if (!root.opened) root.toggleFull() }
+    function hide(): void { root.closeAll() }
+    function toggle(): void { root.toggleFull() }
     function refresh(): string { backend.refresh(); return "ok" }
     function status(): string { return String(backend.healthStatus) }
     function expand(key: string): void { backend.expandedKey = key }

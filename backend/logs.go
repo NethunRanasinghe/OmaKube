@@ -162,10 +162,14 @@ func writeLogExport(outPath, outDir, ctxName, ns, pod, container string, lines [
 		return "", fmt.Errorf("export: destination path or directory required")
 	}
 
-	// Refuse writing directly to critical system directories
-	switch exportDir {
-	case "/", "/etc", "/usr", "/bin", "/sbin", "/boot", "/lib", "/lib64", "/sys", "/proc", "/dev", "/root":
+	// Refuse writing directly to critical system directories or their subpaths
+	if exportDir == "/" {
 		return "", fmt.Errorf("export: refusing to write to system directory %q", exportDir)
+	}
+	for _, sysDir := range []string{"/etc", "/usr", "/bin", "/sbin", "/boot", "/lib", "/lib64", "/sys", "/proc", "/dev", "/root"} {
+		if exportDir == sysDir || strings.HasPrefix(exportDir, sysDir+"/") {
+			return "", fmt.Errorf("export: refusing to write to system directory %q", exportDir)
+		}
 	}
 
 	if err := os.MkdirAll(exportDir, 0o755); err != nil {

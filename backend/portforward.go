@@ -47,8 +47,11 @@ func runPortForward(contextName, override, namespace, targetKind, target string,
 	if kind == "" {
 		kind = "service"
 	}
-	if remotePort <= 0 {
-		return fmt.Errorf("port-forward: --remote-port is required")
+	if remotePort <= 0 || remotePort > 65535 {
+		return fmt.Errorf("port-forward: invalid remote port %d (must be 1-65535)", remotePort)
+	}
+	if localPort < 0 || localPort > 65535 {
+		return fmt.Errorf("port-forward: invalid local port %d (must be 0-65535)", localPort)
 	}
 
 	raw, err := rawConfig(override)
@@ -189,7 +192,7 @@ func firstReadyPodForSelector(ctx context.Context, cs *kubernetes.Clientset, ns 
 	if len(sel) == 0 {
 		return "", fmt.Errorf("port-forward: service has no selector")
 	}
-	pods, err := cs.CoreV1().Pods(ns).List(ctx, metav1.ListOptions{LabelSelector: labels.Set(sel).String()})
+	pods, err := cs.CoreV1().Pods(ns).List(ctx, metav1.ListOptions{LabelSelector: labels.Set(sel).String(), Limit: 100})
 	if err != nil {
 		return "", fmt.Errorf("port-forward: %w", err)
 	}
@@ -208,7 +211,7 @@ func firstReadyPodForSelector(ctx context.Context, cs *kubernetes.Clientset, ns 
 }
 
 func firstReadyPodForOwner(ctx context.Context, cs *kubernetes.Clientset, ns, owner string) (string, error) {
-	pods, err := cs.CoreV1().Pods(ns).List(ctx, metav1.ListOptions{})
+	pods, err := cs.CoreV1().Pods(ns).List(ctx, metav1.ListOptions{Limit: 100})
 	if err != nil {
 		return "", fmt.Errorf("port-forward: %w", err)
 	}

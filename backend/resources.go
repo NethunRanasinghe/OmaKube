@@ -9,6 +9,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/kubernetes"
+	"k8s.io/client-go/rest"
 )
 
 func clientFor(contextName, override string, timeoutSec int) (*kubernetes.Clientset, error) {
@@ -23,24 +24,24 @@ func clientFor(contextName, override string, timeoutSec int) (*kubernetes.Client
 	return kubernetes.NewForConfig(cfg)
 }
 
-func dynamicClientFor(contextName, override string, timeoutSec int) (*dynamic.DynamicClient, *kubernetes.Clientset, error) {
+func dynamicClientFor(contextName, override string, timeoutSec int) (*dynamic.DynamicClient, *kubernetes.Clientset, *rest.Config, error) {
 	raw, err := rawConfig(override)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 	cfg, err := restConfigFor(raw, contextName, timeoutSec)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 	cs, err := kubernetes.NewForConfig(cfg)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 	dyn, err := dynamic.NewForConfig(cfg)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
-	return dyn, cs, nil
+	return dyn, cs, cfg, nil
 }
 
 func ageString(t metav1.Time) string {

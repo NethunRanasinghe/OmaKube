@@ -42,7 +42,7 @@ func runEvents(contextName, override, namespace string, timeoutSec int) error {
 	ctx, cancel := context.WithTimeout(context.Background(), secondsToDuration(timeoutSec))
 	defer cancel()
 
-	list, err := cs.CoreV1().Events(queryNs).List(ctx, metav1.ListOptions{})
+	list, err := cs.CoreV1().Events(queryNs).List(ctx, metav1.ListOptions{Limit: maxEventsLimit})
 	if err != nil {
 		return fmt.Errorf("events: %w", err)
 	}

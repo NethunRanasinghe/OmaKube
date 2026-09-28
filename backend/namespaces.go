@@ -32,7 +32,7 @@ func runNamespaces(contextName, override string, timeoutSec int) error {
 	ctx, cancel := context.WithTimeout(context.Background(), secondsToDuration(timeoutSec))
 	defer cancel()
 
-	nsList, err := cs.CoreV1().Namespaces().List(ctx, metav1.ListOptions{})
+	nsList, err := cs.CoreV1().Namespaces().List(ctx, metav1.ListOptions{Limit: defaultListLimit})
 	if err != nil {
 		return err
 	}
@@ -40,8 +40,8 @@ func runNamespaces(contextName, override string, timeoutSec int) error {
 	for _, ns := range nsList.Items {
 		counts[ns.Name] = &namespaceInfo{Name: ns.Name}
 	}
-	// One pod LIST across all namespaces, grouped locally.
-	if pods, err := cs.CoreV1().Pods("").List(ctx, metav1.ListOptions{}); err == nil {
+	// One bounded pod LIST across all namespaces, grouped locally.
+	if pods, err := cs.CoreV1().Pods("").List(ctx, metav1.ListOptions{Limit: maxHealthPodLimit}); err == nil {
 		for i := range pods.Items {
 			p := &pods.Items[i]
 			info, ok := counts[p.Namespace]
