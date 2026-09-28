@@ -24,8 +24,16 @@ const (
 	// maxHealthPodLimit bounds the pod count evaluated during periodic health checks.
 	maxHealthPodLimit = 1000
 
+	// maxCRDTypes bounds the maximum number of custom resource types queried per refresh,
+	// preventing unbounded API requests on clusters with hundreds of installed CRDs.
+	maxCRDTypes = 30
+
 	// maxCRDItemsPerType bounds the maximum number of items returned per CRD type.
-	maxCRDItemsPerType = 50
+	maxCRDItemsPerType = 25
+
+	// maxTotalCRDItems bounds the cumulative number of custom resource items retained
+	// across all CRD types in a single refresh, preventing unbounded output size.
+	maxTotalCRDItems = 250
 )
 
 // rawConfig loads the merged kubeconfig, optionally restricted to a single

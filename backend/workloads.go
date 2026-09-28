@@ -489,12 +489,23 @@ func queryCustomResources(ctx context.Context, cs *kubernetes.Clientset, cfg *re
 		}
 	}
 
+	// Deterministically sort and bound discovered custom resource types
+	// to prevent unbounded requests on clusters with hundreds of installed CRDs.
+	sort.Slice(targets, func(i, j int) bool {
+		return targets[i].res.Name < targets[j].res.Name
+	})
+	if len(targets) > maxCRDTypes {
+		targets = targets[:maxCRDTypes]
+	}
+
 	if len(targets) == 0 {
 		return
 	}
 
-	// Concurrently query CRDs using a worker pool for maximum responsiveness while bounding memory and network load.
+	// Concurrently query CRDs using a worker pool for maximum responsiveness,
+	// strictly bounding total retained items across all types to prevent memory exhaustion.
 	var mu sync.Mutex
+	totalRetained := 0
 	const workers = 8
 	jobs := make(chan crdTarget, len(targets))
 	for _, t := range targets {
@@ -513,10 +524,29 @@ func queryCustomResources(ctx context.Context, cs *kubernetes.Clientset, cfg *re
 					return
 				default:
 				}
-				items := fetchCRDItems(ctx, cs, metaClient, target.gvr, target.gv, target.res, ns, maxCRDItemsPerType)
+
+				mu.Lock()
+				remainingCap := maxTotalCRDItems - totalRetained
+				mu.Unlock()
+				if remainingCap <= 0 {
+					return
+				}
+
+				limit := int64(maxCRDItemsPerType)
+				if int64(remainingCap) < limit {
+					limit = int64(remainingCap)
+				}
+
+				items := fetchCRDItems(ctx, cs, metaClient, target.gvr, target.gv, target.res, ns, limit)
 				if len(items) > 0 {
 					mu.Lock()
-					result[target.res.Name] = items
+					if totalRetained < maxTotalCRDItems {
+						if totalRetained+len(items) > maxTotalCRDItems {
+							items = items[:maxTotalCRDItems-totalRetained]
+						}
+						totalRetained += len(items)
+						result[target.res.Name] = items
+					}
 					mu.Unlock()
 				}
 			}
